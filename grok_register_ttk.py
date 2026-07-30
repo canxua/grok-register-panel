@@ -36,6 +36,7 @@ from email_providers import cloudflare as cloudflare_provider
 from email_providers import cloudmail as cloudmail_provider
 from email_providers import duckmail as duckmail_provider
 from email_providers import mailnest as mailnest_provider
+from email_providers import moemail as moemail_provider
 from email_providers import yyds as yyds_provider
 from email_providers.common import extract_verification_code as _extract_code
 from email_providers.common import generate_username as _generate_username
@@ -44,6 +45,15 @@ from email_providers.common import pick_list_payload as _pick_list
 import browser_session as _bs
 import register_flow as _rf
 import connectivity as _conn
+from batch_supervisor import mark_slot_completed
+from secure_files import (
+    append_private_text,
+    atomic_write_json,
+    atomic_write_text,
+    create_private_text,
+    ensure_private_dir,
+    exclusive_file_lock,
+)
 from browser_session import (
 
     browser,
@@ -94,7 +104,7 @@ _session_log_lock = threading.Lock()
 
 def ensure_accounts_dir():
     """确保 accounts/ 存在，返回目录绝对路径。"""
-    os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+    ensure_private_dir(ACCOUNTS_DIR)
     return ACCOUNTS_DIR
 
 
@@ -129,15 +139,14 @@ def initialize_session_log(log_dir=None, now=None):
             return _session_log_path
 
         target_dir = log_dir or os.path.join(APP_DIR, "log")
-        os.makedirs(target_dir, exist_ok=True)
+        ensure_private_dir(target_dir)
         timestamp = (now or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
         suffix = 1
         while True:
             suffix_text = "" if suffix == 1 else f"_{suffix}"
             path = os.path.join(target_dir, f"app_{timestamp}{suffix_text}.log")
             try:
-                with open(path, "x", encoding="utf-8", newline="\n"):
-                    pass
+                create_private_text(path)
             except FileExistsError:
                 suffix += 1
                 continue
@@ -151,8 +160,7 @@ def append_session_log(line):
         return
     try:
         with _session_log_lock:
-            with open(path, "a", encoding="utf-8", newline="\n") as log_file:
-                log_file.write(f"{line}\n")
+            append_private_text(path, f"{line}\n")
     except OSError:
         # 持久化日志失败不应中断正在进行的注册任务。
         pass
@@ -204,6 +212,11 @@ DEFAULT_CONFIG = {
     "mailnest_project_code": "x-ai001",
     # YYDS：留空自动选已验证域名；填写则固定该域名
     "yyds_default_domain": "",
+    # MoeMail：站点根 URL + X-API-Key；域名留空时从 /api/config 自动选择
+    "moemail_api_base": "",
+    "moemail_api_key": "",
+    "moemail_domain": "",
+    "moemail_expiry_ms": moemail_provider.DEFAULT_EXPIRY_MS,
     # 账号间注册间隔（秒），0=不等待。填一个整数=N秒固定等待，填区间"60-120"=随机等待
     "account_interval": "60-120",
 }
@@ -361,7 +374,7 @@ def record_register_result(
     }
     line = (
         f"[结果] status={status} ip={exit_ip or '?'} port={port or '?'} "
-        f"email={email or '-'} kind={kind or '-'} bot={bot_flag if bot_flag is not None else '-'} "
+        f"email={mask_email(email) if email else '-'} kind={kind or '-'} bot={bot_flag if bot_flag is not None else '-'} "
         f"risk={risk if risk is not None else '-'}"
     )
     if log_callback:
@@ -370,10 +383,12 @@ def record_register_result(
         except Exception:
             pass
     try:
-        os.makedirs(os.path.dirname(_RESULT_LOG_PATH), exist_ok=True)
+        ensure_private_dir(os.path.dirname(_RESULT_LOG_PATH))
         with _RESULT_LOG_LOCK:
-            with open(_RESULT_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+            append_private_text(
+                _RESULT_LOG_PATH,
+                _json.dumps(rec, ensure_ascii=False) + "\n",
+            )
     except Exception as exc:
         if log_callback:
             try:
@@ -473,8 +488,7 @@ def parse_account_interval() -> float:
 
 def save_config():
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
+        atomic_write_json(CONFIG_FILE, config)
     except Exception as e:
         print(f"保存配置失败: {e}")
 
@@ -598,6 +612,7 @@ _MAIL_DIRECT_MARKERS = (
     "/admin/new_address",
     "/api/mails",
     "/api/mail/",
+    "/api/emails/",
 )
 
 
@@ -761,10 +776,20 @@ def _append_sso_pending(email: str, sso: str, log_callback=None):
     try:
         path = accounts_side_file("sso_pending.txt")
         line = f"{email}----{sso}\n" if email else f"{sso}\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
+        with exclusive_file_lock(path + ".lock"):
+            duplicate = False
+            try:
+                for existing in Path(path).read_text(encoding="utf-8").splitlines():
+                    if existing.strip().split("----")[-1].removeprefix("sso=").strip() == sso:
+                        duplicate = True
+                        break
+            except OSError:
+                pass
+            if not duplicate:
+                append_private_text(path, line)
         if log_callback:
-            log_callback(f"[CPA] 已追加待重转 SSO → {path}")
+            action = "已存在" if duplicate else "已追加"
+            log_callback(f"[CPA] 待重转 SSO {action} → {path}")
     except Exception as exc:
         if log_callback:
             log_callback(f"[CPA] 写入 sso_pending 失败: {exc}")
@@ -775,8 +800,7 @@ def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=N
     try:
         path = accounts_side_file("sso_risk_rejected.txt")
         safe_details = re.sub(r"[\r\n\t]+", " ", str(details or "")).strip()
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{sso}----{safe_details}\n")
+        append_private_text(path, f"{email}----{sso}----{safe_details}\n")
         if log_callback:
             log_callback(f"[CPA] 已保存注册风控拒绝记录 → {path}")
     except Exception as exc:
@@ -1296,6 +1320,77 @@ def cloudmail_get_email_and_token():
     )
 
 
+def get_moemail_api_base():
+    raw = (
+        os.environ.get("MOEMAIL_API_BASE")
+        or os.environ.get("MOEMAIL_API_URL")
+        or config.get("moemail_api_base")
+        or config.get("moemail_api_url")
+        or ""
+    )
+    return moemail_provider.normalize_base(str(raw))
+
+
+def get_moemail_api_key():
+    return str(
+        os.environ.get("MOEMAIL_API_KEY")
+        or config.get("moemail_api_key", "")
+        or ""
+    ).strip()
+
+
+def get_moemail_domain():
+    return str(config.get("moemail_domain", "") or "").strip().lstrip("@")
+
+
+def get_moemail_expiry_ms():
+    raw = config.get("moemail_expiry_ms", moemail_provider.DEFAULT_EXPIRY_MS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return moemail_provider.DEFAULT_EXPIRY_MS
+    allowed = {0, 3_600_000, 86_400_000, 604_800_000}
+    return value if value in allowed else moemail_provider.DEFAULT_EXPIRY_MS
+
+
+def moemail_get_email_and_token():
+    # MoeMail owns its domain list. Do not reuse defaultDomains from another provider.
+    return moemail_provider.create_mailbox(
+        http_get,
+        http_post,
+        get_moemail_api_base(),
+        get_moemail_api_key(),
+        domain=get_moemail_domain(),
+        expiry_time=get_moemail_expiry_ms(),
+    )
+
+
+def moemail_get_oai_code(
+    email_id,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    resend_callback=None,
+):
+    return moemail_provider.wait_for_code(
+        http_get,
+        get_moemail_api_base(),
+        get_moemail_api_key(),
+        email_id,
+        email=email,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        http_delete=http_delete,
+        raise_if_cancelled=raise_if_cancelled,
+        sleep_with_cancel=sleep_with_cancel,
+        log_callback=log_callback,
+        cancel_callback=cancel_callback,
+        resend_callback=resend_callback,
+    )
+
+
 def cloudmail_get_oai_code(
     dev_token,
     email,
@@ -1333,6 +1428,8 @@ def get_email_and_token(api_key=None):
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
     if provider == "cloudmail":
         return cloudmail_get_email_and_token()
+    if provider == "moemail":
+        return moemail_get_email_and_token()
     if provider == "cloudflare":
         api_base = get_cloudflare_api_base()
         if not api_base:
@@ -1388,6 +1485,16 @@ def get_oai_code(
         )
     if provider == "cloudmail":
         return cloudmail_get_oai_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
+        )
+    if provider == "moemail":
+        return moemail_get_oai_code(
             dev_token,
             email,
             timeout=timeout,
@@ -2113,7 +2220,7 @@ class GrokRegisterGUI:
         self.email_provider_combo = tk_option_menu(
             config_frame,
             self.email_provider_var,
-            ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail"],
+            ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail"],
             width=12,
         )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
@@ -2311,12 +2418,73 @@ class GrokRegisterGUI:
             ),
         ]
 
+        # MoeMail
+        self.moemail_api_base_var = tk.StringVar(
+            value=str(
+                config.get("moemail_api_base")
+                or config.get("moemail_api_url")
+                or ""
+            )
+        )
+        self.moemail_api_key_var = tk.StringVar(
+            value=str(config.get("moemail_api_key", "") or "")
+        )
+        self.moemail_domain_var = tk.StringVar(
+            value=str(config.get("moemail_domain", "") or "")
+        )
+        self.moemail_expiry_ms_var = tk.StringVar(
+            value=str(
+                config.get("moemail_expiry_ms", moemail_provider.DEFAULT_EXPIRY_MS)
+            )
+        )
+        self._moemail_widgets = [
+            p_label(0, 0, "站点 URL:"),
+            p_field(
+                tk_entry(self.provider_frame, textvariable=self.moemail_api_base_var, width=52),
+                0,
+                1,
+                columnspan=3,
+            ),
+            p_label(1, 0, "API Key:"),
+            p_field(
+                tk_entry(self.provider_frame, textvariable=self.moemail_api_key_var, width=34, show="*"),
+                1,
+                1,
+            ),
+            p_label(1, 2, "固定域名（可选）:"),
+            p_field(tk_entry(self.provider_frame, textvariable=self.moemail_domain_var, width=34), 1, 3),
+            p_label(2, 0, "有效期:"),
+            p_field(
+                tk_option_menu(
+                    self.provider_frame,
+                    self.moemail_expiry_ms_var,
+                    ["3600000", "86400000", "604800000", "0"],
+                    width=12,
+                ),
+                2,
+                1,
+                sticky=tk.W,
+            ),
+            p_label(2, 2, "说明:"),
+            p_field(
+                tk_label(
+                    self.provider_frame,
+                    text="域名留空时自动读取 /api/config",
+                    bg=UI_PANEL_BG,
+                ),
+                2,
+                3,
+                sticky=tk.W,
+            ),
+        ]
+
         self._provider_widget_groups = {
             "duckmail": self._duckmail_widgets,
             "cloudflare": self._cloudflare_widgets,
             "yyds": self._yyds_widgets,
             "mailnest": self._mailnest_widgets,
             "cloudmail": self._cloudmail_widgets,
+            "moemail": self._moemail_widgets,
         }
 
         add_label(3, 0, "并发数（可选）:")
@@ -2492,6 +2660,7 @@ class GrokRegisterGUI:
             "yyds": "YYDS 配置",
             "mailnest": "MailNest 配置",
             "cloudmail": "CloudMail 配置",
+            "moemail": "MoeMail 配置",
         }
         self.provider_frame.configure(text=titles.get(provider, "邮箱服务商配置"))
         for widgets in self._provider_widget_groups.values():
@@ -2578,6 +2747,13 @@ class GrokRegisterGUI:
             config["cloudmail_url"] = self.cloudmail_url_var.get().strip()
             config["cloudmail_admin_email"] = self.cloudmail_admin_email_var.get().strip()
             config["cloudmail_password"] = self.cloudmail_password_var.get()
+            config["moemail_api_base"] = self.moemail_api_base_var.get().strip()
+            config["moemail_api_key"] = self.moemail_api_key_var.get().strip()
+            config["moemail_domain"] = self.moemail_domain_var.get().strip().lstrip("@")
+            config["moemail_expiry_ms"] = int(
+                self.moemail_expiry_ms_var.get().strip()
+                or moemail_provider.DEFAULT_EXPIRY_MS
+            )
             config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
             _mode_text = str(self.cpa_token_mode_var.get()).strip()
             if "协议" in _mode_text:
@@ -2679,6 +2855,16 @@ class GrokRegisterGUI:
         config["cloudmail_url"] = self.cloudmail_url_var.get().strip()
         config["cloudmail_admin_email"] = self.cloudmail_admin_email_var.get().strip()
         config["cloudmail_password"] = self.cloudmail_password_var.get()
+        config["moemail_api_base"] = self.moemail_api_base_var.get().strip()
+        config["moemail_api_key"] = self.moemail_api_key_var.get().strip()
+        config["moemail_domain"] = self.moemail_domain_var.get().strip().lstrip("@")
+        try:
+            config["moemail_expiry_ms"] = int(
+                self.moemail_expiry_ms_var.get().strip()
+                or moemail_provider.DEFAULT_EXPIRY_MS
+            )
+        except ValueError:
+            config["moemail_expiry_ms"] = moemail_provider.DEFAULT_EXPIRY_MS
         config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
         _mode_text = str(self.cpa_token_mode_var.get()).strip()
         if "协议" in _mode_text:
@@ -2707,6 +2893,15 @@ class GrokRegisterGUI:
         if config["email_provider"] == "mailnest" and not config["mailnest_api_key"]:
             self.log("[!] MailNest 模式需要先填写 MailNest API Key")
             return
+        if config["email_provider"] == "moemail":
+            missing = []
+            if not get_moemail_api_base():
+                missing.append("MoeMail 站点 URL")
+            if not get_moemail_api_key():
+                missing.append("MoeMail API Key")
+            if missing:
+                self.log(f"[!] MoeMail 模式缺少配置: {', '.join(missing)}")
+                return
         if config["email_provider"] == "cloudmail":
             missing = []
             if not get_cloudmail_url():
@@ -2879,12 +3074,10 @@ class GrokRegisterGUI:
                         wlog(f"[*] 邮箱: {email}")
                         wlog(f"[Debug] 邮箱 token 已获取 (len={len(str(dev_token or ''))})")
                         try:
-                            with open(
+                            append_private_text(
                                 accounts_side_file("mail_credentials.txt"),
-                                "a",
-                                encoding="utf-8",
-                            ) as f:
-                                f.write(f"{email}\t{dev_token}\n")
+                                f"{email}\t{dev_token}\n",
+                            )
                         except Exception:
                             pass
                         wlog("[*] 3. 拉取验证码")
@@ -2938,11 +3131,9 @@ class GrokRegisterGUI:
                         alock = getattr(self, "_accounts_lock", None)
                         if alock:
                             with alock:
-                                with open(email_file, "w", encoding="utf-8") as f:
-                                    f.write(line)
+                                atomic_write_text(email_file, line)
                         else:
-                            with open(email_file, "w", encoding="utf-8") as f:
-                                f.write(line)
+                            atomic_write_text(email_file, line)
                     except Exception as file_exc:
                         wlog(f"[!] 保存账号文件失败，当前账号不计为成功: {file_exc}")
                         _append_sso_pending(email, sso, log_callback=wlog)
@@ -3000,24 +3191,24 @@ class GrokRegisterGUI:
                     wlog(f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
                 finally:
                     self.update_stats()
+                if self.should_stop():
+                    break
+                # 每轮结束只关浏览器，不立刻再开。
+                # 下一轮 open_signup_page 会按需启动并导航到官网，避免空浏览器残留。
+                if i >= count:
+                    continue
+                # 账号间随机间隔
+                wait_sec = parse_account_interval()
+                if wait_sec > 0:
+                    wlog(f"[*] 下一个账号前等待 {wait_sec:.0f} 秒...")
+                    sleep_with_cancel(wait_sec, self.should_stop)
+                try:
+                    stop_browser()
+                    time.sleep(0.5)
+                except Exception as close_exc:
                     if self.should_stop():
                         break
-                    # 每轮结束只关浏览器，不立刻再开。
-                    # 下一轮 open_signup_page 会按需启动并导航到官网，避免空浏览器残留。
-                    if i >= count:
-                        continue
-                    # 账号间随机间隔
-                    wait_sec = parse_account_interval()
-                    if wait_sec > 0:
-                        wlog(f"[*] 下一个账号前等待 {wait_sec:.0f} 秒...")
-                        sleep_with_cancel(wait_sec, self.should_stop)
-                    try:
-                        stop_browser()
-                        time.sleep(0.5)
-                    except Exception as close_exc:
-                        if self.should_stop():
-                            break
-                        wlog(f"[Debug] 轮次关闭浏览器失败: {close_exc}")
+                    wlog(f"[Debug] 轮次关闭浏览器失败: {close_exc}")
         except RegistrationCancelled:
             wlog("[!] 注册被用户停止")
         except Exception as exc:
@@ -3156,6 +3347,7 @@ def run_registration_cli(count):
                     if not booted:
                         local_fail = n
                         local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + n
+                        mark_slot_completed(n)
                         cli_log(f"[W{wid+1}] [-] 浏览器启动失败，{n} 个任务均记为失败: {last_boot}")
                         record_register_result(
                             "fail",
@@ -3206,8 +3398,7 @@ def run_registration_cli(count):
                             with accounts_lock:
                                 # 以邮箱命名单独保存
                                 email_file = account_file_for_email(email)
-                                with open(email_file, "w", encoding="utf-8") as f:
-                                    f.write(line)
+                                atomic_write_text(email_file, line)
                         except Exception as file_exc:
                             cli_log(
                                 f"[W{wid+1}] [!] 保存账号文件失败，当前账号不计为成功: {file_exc}"
@@ -3237,6 +3428,7 @@ def run_registration_cli(count):
                             bot_flag=0,
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                         )
+                        mark_slot_completed()
                         # 每成功 2 个换 sticky，降低同 IP 密度（对齐 ~4 分钟窗口）
                         if local_success % 2 == 0:
                             rotate_idx += 1
@@ -3257,6 +3449,7 @@ def run_registration_cli(count):
                             worker=f"W{wid+1}",
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                         )
+                        mark_slot_completed()
                     except AccountRetryNeeded as exc:
                         retry += 1
                         if retry > max_slot_retry:
@@ -3266,6 +3459,7 @@ def run_registration_cli(count):
                             i += 1
                             retry = 0
                             cli_log(f"[W{wid+1}] [-] 卡住跳过: {exc}")
+                            mark_slot_completed()
                     except Exception as exc:
                         msg = str(exc)
                         blank_ui = (
@@ -3333,6 +3527,7 @@ def run_registration_cli(count):
                                 risk=_rk,
                                 log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             )
+                        mark_slot_completed()
                         if kind == FAIL_RISK:
                             rotate_idx += 1
                             cli_log(f"[W{wid+1}] [*] 风控拒绝，切换 sticky #{rotate_idx}")
@@ -3421,6 +3616,7 @@ def run_registration_cli(count):
         except Exception as boot_exc:
             fail_count += count
             fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + count
+            mark_slot_completed(count)
             cli_log(f"[-] 浏览器启动失败，{count} 个任务均记为失败: {boot_exc}")
             return
         cli_log("[*] 浏览器已启动")
@@ -3447,12 +3643,10 @@ def run_registration_cli(count):
                     cli_log(f"[*] 邮箱: {email}")
                     cli_log(f"[Debug] 邮箱 token 已获取 (len={len(str(dev_token or ''))})")
                     try:
-                        with open(
+                        append_private_text(
                             accounts_side_file("mail_credentials.txt"),
-                            "a",
-                            encoding="utf-8",
-                        ) as f:
-                            f.write(f"{email}\t{dev_token}\n")
+                            f"{email}\t{dev_token}\n",
+                        )
                     except Exception:
                         pass
                     cli_log("[*] 3. 拉取验证码")
@@ -3500,8 +3694,7 @@ def run_registration_cli(count):
                     line = f"{email}----{profile.get('password','')}----{sso}\n"
                     # 以邮箱命名单独保存
                     email_file = account_file_for_email(email)
-                    with open(email_file, "w", encoding="utf-8") as f:
-                        f.write(line)
+                    atomic_write_text(email_file, line)
                 except Exception as file_exc:
                     cli_log(f"[!] 保存账号文件失败，当前账号不计为成功: {file_exc}")
                     _append_sso_pending(email, sso, log_callback=cli_log)
@@ -3515,6 +3708,7 @@ def run_registration_cli(count):
                 else:
                     cli_log(f"[+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
                 cli_log(f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count}")
+                mark_slot_completed()
                 if success_count > 0 and success_count % MEMORY_CLEANUP_INTERVAL == 0 and i < count:
                     cleanup_runtime_memory(
                         log_callback=cli_log,
@@ -3529,6 +3723,7 @@ def run_registration_cli(count):
                 i += 1
                 cli_log(f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
                 cli_log("[!] 请更换邮箱提供商或域名（如 Cloudflare 自建域 / MailNest），公共临时域常被拉黑")
+                mark_slot_completed()
             except AccountRetryNeeded as exc:
                 retry_count_for_slot += 1
                 if retry_count_for_slot <= max_slot_retry:
@@ -3540,36 +3735,37 @@ def run_registration_cli(count):
                     retry_count_for_slot = 0
                     i += 1
                     cli_log(f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                    mark_slot_completed()
             except Exception as exc:
                 kind = _cli_record_failure(exc)
                 retry_count_for_slot = 0
                 i += 1
                 cli_log(f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
-            finally:
+                mark_slot_completed()
+            if controller.should_stop():
+                break
+            # 每轮结束只关浏览器，不立刻再开。
+            # 下一轮 open_signup_page 会按需启动并导航到官网，避免空浏览器残留。
+            if i >= count:
+                continue
+            # 账号间随机间隔
+            wait_sec = parse_account_interval()
+            if wait_sec > 0:
+                cli_log(f"[*] 下一个账号前等待 {wait_sec:.0f} 秒...")
+                _sleep_cancelable(wait_sec, controller.should_stop)
+            try:
+                stop_browser()
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                controller.stop()
+                cli_log("[!] 收到 Ctrl+C，正在停止（再按一次强制中断）")
+                break
+            except RegistrationCancelled:
+                break
+            except Exception as close_exc:
                 if controller.should_stop():
                     break
-                # 每轮结束只关浏览器，不立刻再开。
-                # 下一轮 open_signup_page 会按需启动并导航到官网，避免空浏览器残留。
-                if i >= count:
-                    continue
-                # 账号间随机间隔
-                wait_sec = parse_account_interval()
-                if wait_sec > 0:
-                    cli_log(f"[*] 下一个账号前等待 {wait_sec:.0f} 秒...")
-                    _sleep_cancelable(wait_sec, controller.should_stop)
-                try:
-                    stop_browser()
-                    time.sleep(0.5)
-                except KeyboardInterrupt:
-                    controller.stop()
-                    cli_log("[!] 收到 Ctrl+C，正在停止（再按一次强制中断）")
-                    break
-                except RegistrationCancelled:
-                    break
-                except Exception as close_exc:
-                    if controller.should_stop():
-                        break
-                    cli_log(f"[Debug] 轮次关闭浏览器失败: {close_exc}")
+                cli_log(f"[Debug] 轮次关闭浏览器失败: {close_exc}")
     except KeyboardInterrupt:
         controller.stop()
         cli_log("[!] 收到 Ctrl+C，正在停止并清理")

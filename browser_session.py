@@ -29,6 +29,8 @@ from playwright._impl._transport import PipeTransport as _PwPipeTransport
 from playwright.sync_api._generated import Playwright as _SyncPlaywright
 
 from camoufox_adapter import CamoufoxBrowser, CamoufoxPage
+from secure_files import ensure_private_dir
+from webui.blacklist_store import read_blacklist
 
 
 class SafeCamoufox(_Camoufox):
@@ -164,38 +166,9 @@ def clear_exit_context() -> None:
 
 
 
-# 注册出口黑名单（可按 AS / ISP 关键字扩展）
+# Baseline values remain as compatibility constants. Runtime additions live in
+# log/blacklist_state.json and are never written into Python source.
 _BLOCKED_ASN_SUBSTR = (
-    "AS7018",  # auto AT&T Enterprises, LLC
-
-    "AS6128",  # auto Cablevision Systems Corp.
-
-    "AS30036",  # auto Mediacom Communications Corp
-
-    "AS11426",  # auto Charter Communications Inc
-
-    "AS6167",  # auto Verizon Business
-
-    "AS33588",  # auto Charter Communications LLC
-
-    "AS17072",  # auto TOTAL PLAY TELECOMUNICACIONES SA DE CV
-
-    "AS20115",  # auto Charter Communications LLC
-
-    "AS274115",  # auto INTERNET Y TELEVISIÓN S.A.S.
-
-    "AS63062",  # auto Hughes Network Systems, LLC
-
-    "AS21928",  # auto T-mobile Usa, Inc.
-
-    "AS16591",  # auto Google Fiber Inc.
-
-    "AS20001",  # auto Charter Communications Inc
-
-    "AS209",  # auto Centurylink Communications, LLC
-
-    "AS33363",  # auto Charter Communications, INC
-
     "AS7922",  # Comcast Cable
     "AS5650",  # Frontier Communications
 )
@@ -204,7 +177,7 @@ _BLOCKED_ISP_SUBSTR = (
     "comcast ip services",
     "frontier communications",
 )
-_BLOCKED_ASN_NUMS = {209, 5650, 6128, 6167, 7018, 7922, 11426, 16591, 17072, 20001, 20115, 21928, 30036, 33363, 33588, 63062, 274115}
+_BLOCKED_ASN_NUMS = {5650, 7922}
 _asn_cache = {}
 _asn_cache_lock = __import__("threading").Lock()
 
@@ -223,9 +196,9 @@ def lookup_exit_meta(ip: str) -> dict:
     # 服务器环境常设 HTTP_PROXY，geo API 走代理会 502/超时；必须直连
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     errors = []
-    # 1) ipwho.is
+    # 1) ipwho.is over TLS
     try:
-        raw = opener.open(f"http://ipwho.is/{ip}", timeout=10).read().decode("utf-8", errors="replace")
+        raw = opener.open(f"https://ipwho.is/{ip}", timeout=10).read().decode("utf-8", errors="replace")
         data = json.loads(raw or "{}")
         if data.get("success") is False:
             raise RuntimeError(data.get("message") or "ipwho fail")
@@ -246,20 +219,26 @@ def lookup_exit_meta(ip: str) -> dict:
         }
     except Exception as exc:
         errors.append(f"ipwho:{exc}")
-        # 2) fallback ip-api 直连
+        # 2) fallback ipapi.co over TLS
         try:
-            url = (
-                f"http://ip-api.com/json/{ip}"
-                f"?fields=status,message,country,regionName,city,isp,org,as,mobile,proxy,hosting,query"
-            )
+            url = f"https://ipapi.co/{ip}/json/"
             raw = opener.open(url, timeout=10).read().decode("utf-8", errors="replace")
             data = json.loads(raw or "{}")
-            if data.get("status") == "fail":
-                raise RuntimeError(data.get("message") or "ip-api fail")
-            info = dict(data)
-            info["source"] = "ip-api"
-            # parse asn number from "AS7922 Comcast..."
-            m = __import__("re").search(r"AS(\d+)", str(info.get("as") or ""))
+            if data.get("error"):
+                raise RuntimeError(data.get("reason") or "ipapi.co fail")
+            as_text = str(data.get("asn") or "")
+            info = {
+                "query": ip,
+                "status": "success",
+                "as": as_text,
+                "isp": data.get("org") or "",
+                "org": data.get("org") or "",
+                "city": data.get("city") or "",
+                "regionName": data.get("region") or "",
+                "country": data.get("country_name") or "",
+                "source": "ipapi.co",
+            }
+            m = __import__("re").search(r"AS(\d+)", as_text)
             if m:
                 info["asn"] = int(m.group(1))
         except Exception as exc2:
@@ -286,17 +265,18 @@ def is_blocked_exit_ip(ip: str) -> tuple:
     isp = str(info.get("isp") or "")
     org = str(info.get("org") or "")
     blob = f"{asn} | {isp} | {org}".lower()
-    # 硬规则：Comcast AS7922
-    if asn_num in _BLOCKED_ASN_NUMS or asn_num == 7922:
-        return True, f"blocked AS7922 Comcast: {asn} / {isp} / {org} / {info.get('city')}"
-    for key in _BLOCKED_ASN_SUBSTR:
+    state = read_blacklist()
+    blocked_asns = set(state.get("asns") or _BLOCKED_ASN_NUMS)
+    blocked_asn_labels = tuple(f"AS{value}" for value in blocked_asns)
+    blocked_isp_keywords = tuple(state.get("isp_keywords") or _BLOCKED_ISP_SUBSTR)
+    if asn_num in blocked_asns:
+        return True, f"blocked ASN AS{asn_num}: {asn} / {isp} / {org} / {info.get('city')}"
+    for key in blocked_asn_labels:
         if key.lower() in blob:
             return True, f"blocked ASN {key}: {asn} / {isp} / {info.get('city')}"
-    for key in _BLOCKED_ISP_SUBSTR:
+    for key in blocked_isp_keywords:
         if key in blob:
             return True, f"blocked ISP '{key}': {asn} / {isp} / {info.get('city')}"
-    if "comcast" in blob:
-        return True, f"blocked Comcast keyword: {asn} / {isp} / {org} / {info.get('city')}"
     summary = f"{asn or '?'} | {isp or '?'} | {info.get('city') or '?'}"
     return False, summary
 
@@ -366,6 +346,16 @@ def _rmtree_with_retry(path: str, max_retries: int = 3, delay: float = 0.5) -> b
     return not os.path.isdir(path)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _cleanup_profile_dir(profile_dir=None) -> None:
     """关闭浏览器后删除临时 user-data，避免 TEMP 堆积。"""
     path = profile_dir if profile_dir is not None else getattr(_tls, "profile_dir", None)
@@ -394,6 +384,7 @@ def cleanup_stale_profiles(log_callback=None) -> int:
     root = os.path.join(tempfile.gettempdir(), _PROFILE_ROOT_MARKER)
     if not os.path.isdir(root):
         return 0
+    ensure_private_dir(root)
 
     current_pid = os.getpid()
     cleaned = 0
@@ -402,9 +393,13 @@ def cleanup_stale_profiles(log_callback=None) -> int:
             entry_path = os.path.join(root, entry)
             if not os.path.isdir(entry_path):
                 continue
-            # 目录名格式: {pid}-{thread_id}-{uuid8}
-            # 只跳过当前进程的活跃目录
-            if entry.startswith(f"{current_pid}-"):
+            # Directory format: {pid}-{thread_id}-{uuid8}. Unknown names are
+            # never removed, and profiles owned by any live process are kept.
+            match = __import__("re").fullmatch(r"(\d+)-\d+-[0-9a-fA-F]{8}", entry)
+            if not match:
+                continue
+            owner_pid = int(match.group(1))
+            if owner_pid == current_pid or _pid_alive(owner_pid):
                 continue
             if _rmtree_with_retry(entry_path):
                 cleaned += 1
@@ -625,12 +620,14 @@ def create_browser_options(unique_profile=True) -> dict:
 
     # Profile 隔离
     if unique_profile:
-        profile_dir = os.path.join(
-            tempfile.gettempdir(),
-            _PROFILE_ROOT_MARKER,
-            f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}",
+        profile_root = ensure_private_dir(
+            os.path.join(tempfile.gettempdir(), _PROFILE_ROOT_MARKER)
         )
-        os.makedirs(profile_dir, exist_ok=True)
+        profile_dir = str(
+            profile_root
+            / f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+        )
+        ensure_private_dir(profile_dir)
         opts["persistent_context"] = True
         opts["user_data_dir"] = profile_dir
         _tls.profile_dir = profile_dir

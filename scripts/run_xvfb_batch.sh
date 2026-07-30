@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Batch entry: Xvfb + dual workers (register_workers=2 in config.json)
 set -euo pipefail
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 COUNT="${1:-10}"
 # update count only
-python3 - << PY
+python3 - "$COUNT" <<'PY'
 import json
+import sys
 from pathlib import Path
+from secure_files import atomic_write_json
 p=Path("config.json")
 c=json.loads(p.read_text())
-c["register_count"]=int("${COUNT}")
+c["register_count"]=int(sys.argv[1])
 c["register_workers"]=2
-p.write_text(json.dumps(c, ensure_ascii=False, indent=2)+"\n")
+atomic_write_json(p, c)
 print("batch count", c["register_count"], "workers", c["register_workers"])
 PY
-exec ./run_xvfb_smoke.sh "$COUNT"
+exec ./scripts/run_xvfb_smoke.sh "$COUNT"

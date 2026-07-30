@@ -17,7 +17,8 @@ fi
 
 echo "=== 1) proxy probe ==="
 PROXY=$(python3 -c "import json; print(json.load(open('config.json')).get('proxy',''))")
-echo "config.proxy=$PROXY"
+PROXY_DISPLAY=$(PROXY="$PROXY" python3 -c "import os; from webui.security_utils import redact_proxy; print(redact_proxy(os.environ.get('PROXY','')))")
+echo "config.proxy=$PROXY_DISPLAY"
 if [[ -n "$PROXY" ]]; then
   ip=$(curl -s -m 8 -x "$PROXY" https://api.ipify.org || true)
   echo "exit_ip=$ip"

@@ -5,4 +5,5 @@
 - yyds: YYDS
 - mailnest: 迈巢 Outlook
 - cloudmail: maillab/cloud-mail
+- moemail: MoeMail OpenAPI
 """

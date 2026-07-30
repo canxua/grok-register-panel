@@ -5,16 +5,23 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import subprocess
 import time
 import urllib.request
 from collections import Counter
 from pathlib import Path
 
+from secure_files import append_private_text, ensure_private_dir
+from webui.blacklist_store import add_asn as add_blacklist_asn
+from webui.blacklist_store import read_blacklist
+from webui.process_utils import (
+    find_managed_processes,
+    terminate_managed_processes,
+    write_pid_file,
+)
+
 ROOT = Path(__file__).resolve().parent
 AUTHS = Path(__import__("os").environ.get("CPA_AUTH_DIR", str(ROOT / "cpa_auth")))
-BS = ROOT / "browser_session.py"
 LOG_DIR = ROOT / "log"
 RESULTS = LOG_DIR / "register_results.jsonl"
 ORCH_LOG = LOG_DIR / f"orch100-fixed-{time.strftime('%Y%m%d-%H%M%S')}.log"
@@ -71,14 +78,13 @@ def apply_control() -> None:
             pass
 
 os.chdir(ROOT)
-LOG_DIR.mkdir(exist_ok=True)
+ensure_private_dir(LOG_DIR)
 
 
 def log(msg: str) -> None:
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
-    with open(ORCH_LOG, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    append_private_text(ORCH_LOG, line + "\n")
 
 
 def cpa_count() -> int:
@@ -86,132 +92,69 @@ def cpa_count() -> int:
 
 
 def kill_batch() -> None:
-    """Kill run_batch_headless and its process group (xvfb-run)."""
-    out = subprocess.check_output(["ps", "-ef"], text=True)
-    pids = set()
-    for line in out.splitlines():
-        if "run_batch_headless.py" in line and "awk" not in line:
-            pids.add(int(line.split()[1]))
-        if "xvfb-run" in line and "run_batch_headless" in line:
-            pids.add(int(line.split()[1]))
-    # also pid file
-    pf = LOG_DIR / "batch100.pid"
-    if pf.exists():
-        try:
-            pids.add(int(pf.read_text().strip()))
-        except Exception:
-            pass
-    for pid in list(pids):
-        try:
-            # kill whole group if started with start_new_session
-            os.killpg(pid, signal.SIGTERM)
-        except Exception:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except Exception:
-                pass
-        try:
-            kids = subprocess.check_output(["ps", "--ppid", str(pid), "-o", "pid="], text=True).split()
-            for k in kids:
-                try:
-                    os.kill(int(k), signal.SIGTERM)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    time.sleep(2)
-    for pid in list(pids):
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except Exception:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
-    # reap zombies: kill leftover python run_batch
-    out = subprocess.check_output(["ps", "-ef"], text=True)
-    for line in out.splitlines():
-        if "run_batch_headless.py" in line and "awk" not in line:
-            try:
-                os.kill(int(line.split()[1]), signal.SIGKILL)
-            except Exception:
-                pass
+    """Stop only batch processes that belong to this project root."""
+    terminate_managed_processes(ROOT, ("run_batch_headless.py",))
 
 
 def start_batch(count: int):
     logname = LOG_DIR / f"batch-orch-{time.strftime('%Y%m%d-%H%M%S')}-n{count}.log"
-    fout = open(logname, "w")
-    proc = subprocess.Popen(
-        [
-            "xvfb-run",
-            "-a",
-            "-s",
-            "-screen 0 1920x1080x24",
-            str(ROOT / ".venv/bin/python"),
-            "-u",
-            str(ROOT / "run_batch_headless.py"),
-            str(count),
-            str(WORKERS),
-        ],
-        cwd=str(ROOT),
-        stdout=fout,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    (LOG_DIR / "batch100.pid").write_text(str(proc.pid))
+    fd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    fout = os.fdopen(fd, "w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [
+                "xvfb-run",
+                "-a",
+                "-s",
+                "-screen 0 1920x1080x24",
+                str(ROOT / ".venv/bin/python"),
+                "-u",
+                str(ROOT / "run_batch_headless.py"),
+                str(count),
+                str(WORKERS),
+            ],
+            cwd=str(ROOT),
+            stdout=fout,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        fout.close()
+    write_pid_file(LOG_DIR / "batch100.pid", proc.pid)
     log(f"started pid={proc.pid} count={count} workers={WORKERS} log={logname.name}")
     return proc.pid, logname
 
 
 def read_blocklist_asns() -> set:
-    text = BS.read_text()
-    nums: set = set()
-    m = re.search(r"_BLOCKED_ASN_NUMS\s*=\s*\{([^}]*)\}", text)
-    if m:
-        nums |= {int(x) for x in re.findall(r"\d+", m.group(1))}
-    block = re.search(r"_BLOCKED_ASN_SUBSTR\s*=\s*\((.*?)\)", text, re.S)
-    if block:
-        nums |= {int(x) for x in re.findall(r"AS(\d+)", block.group(1))}
-    return nums or {7922, 5650}
+    return set(read_blacklist().get("asns") or {7922, 5650})
 
 
 def add_asn_to_blocklist(asn: int, isp_hint: str = "") -> bool:
-    text = BS.read_text()
-    nums = read_blocklist_asns()
-    if asn in nums:
+    if int(asn) in read_blocklist_asns():
         log(f"ASN{asn} already blocked")
         return False
-    nums.add(int(asn))
-    new_nums = "_BLOCKED_ASN_NUMS = {" + ", ".join(str(n) for n in sorted(nums)) + "}"
-    if "_BLOCKED_ASN_NUMS" in text:
-        text = re.sub(r"_BLOCKED_ASN_NUMS\s*=\s*\{[^}]*\}", new_nums, text, count=1)
-    else:
-        text = text.replace(
-            "_BLOCKED_ASN_SUBSTR = (",
-            new_nums + "\n_BLOCKED_ASN_SUBSTR = (",
-            1,
-        )
-    if f'"AS{asn}"' not in text:
-        text = text.replace(
-            "_BLOCKED_ASN_SUBSTR = (",
-            f'_BLOCKED_ASN_SUBSTR = (\n    "AS{asn}",  # auto {isp_hint[:50]}\n',
-            1,
-        )
-    BS.write_text(text)
-    log(f"ADDED blacklist AS{asn} ({isp_hint})")
-    return True
+    added = add_blacklist_asn(asn, isp_hint, source="auto")
+    if added:
+        clean_hint = re.sub(r"\s+", " ", str(isp_hint or "")).strip()[:80]
+        log(f"ADDED blacklist AS{int(asn)} ({clean_hint})")
+    return added
 
 
 def lookup_asn(ip: str, timeout: float = 5.0) -> dict:
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        data = json.loads(opener.open(f"http://ipwho.is/{ip}", timeout=timeout).read())
+        data = json.loads(opener.open(f"https://ipwho.is/{ip}", timeout=timeout).read())
         conn = data.get("connection") or {}
+        asn = int(conn.get("asn"))
         return {
-            "asn": conn.get("asn"),
-            "isp": conn.get("isp") or "",
-            "org": conn.get("org") or "",
-            "city": data.get("city") or "",
+            "asn": asn,
+            "isp": re.sub(r"\s+", " ", str(conn.get("isp") or "")).strip()[:120],
+            "org": re.sub(r"\s+", " ", str(conn.get("org") or "")).strip()[:120],
+            "city": re.sub(r"\s+", " ", str(data.get("city") or "")).strip()[:80],
         }
     except Exception as e:
         return {"error": str(e)}
@@ -331,21 +274,8 @@ def analyze_risks_and_expand(logpath: Path) -> list:
 
 
 def batch_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        # check any run_batch still
-        return "run_batch_headless.py" in subprocess.check_output(["ps", "-ef"], text=True)
-    # defunct parent still "alive" but child gone
-    try:
-        # if process is zombie, treat as dead
-        with open(f"/proc/{pid}/stat") as f:
-            stat = f.read()
-        if " Z " in f" {stat} " or " Z\n" in stat or ") Z " in stat:
-            return "run_batch_headless.py" in subprocess.check_output(["ps", "-ef"], text=True)
-    except Exception:
-        pass
-    return "run_batch_headless.py" in subprocess.check_output(["ps", "-ef"], text=True)
+    del pid
+    return bool(find_managed_processes(ROOT, ("run_batch_headless.py",)))
 
 
 def main():

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
-import os
 """
 SSO cookie → CPA / Grok2API auth.json 格式（纯 HTTP）
 
@@ -27,28 +24,12 @@ SSO cookie → CPA / Grok2API auth.json 格式（纯 HTTP）
     --grok2api-auth-dir /path/to/g2a --proxy http://127.0.0.1:7890
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import hashlib
 import json
-
-
-def _ensure_private_file(path) -> None:
-    """Owner-only permissions for auth material."""
-    import os
-    from pathlib import Path
-    p = Path(path)
-    try:
-        if p.parent and p.parent.exists():
-            os.chmod(p.parent, 0o700)
-    except Exception:
-        pass
-    try:
-        if p.exists():
-            os.chmod(p, 0o600)
-    except Exception:
-        pass
-
 import os
 import re
 import secrets
@@ -57,10 +38,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from curl_cffi import requests
+from secure_files import (
+    atomic_write_json,
+    atomic_write_text,
+    ensure_private_dir,
+    exclusive_file_lock,
+)
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 OIDC_ISSUER = "https://auth.x.ai"
@@ -160,7 +148,7 @@ def _save_working_next_action_id(action_id: str) -> None:
     if not val:
         return
     try:
-        _NEXT_ACTION_CACHE_PATH.write_text(val + "\n", encoding="utf-8")
+        atomic_write_text(_NEXT_ACTION_CACHE_PATH, val + "\n")
     except Exception:
         pass
 
@@ -1331,12 +1319,9 @@ def write_cpa_auth(auth_dir: Path, record: dict) -> Path:
     无 email 时用 sub(user_id) 命名，避免多个无 email 账号写成同一个
     xai-unknown.json 互相覆盖。
     """
-    auth_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(auth_dir)
     path = auth_dir / cpa_auth_filename(record)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    _ensure_private_file(path)
+    atomic_write_json(path, record)
     return path
 
 
@@ -1354,7 +1339,7 @@ def grok2api_auth_filename(entry: dict, email: str = "") -> str:
 
 def write_grok2api_auth(auth_dir: Path, token: dict, email: str = "") -> Path:
     """写出 Grok2API / ~/.grok 风格 auth（issuer::client_id 嵌套）。"""
-    auth_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(auth_dir)
     key, entry = token_to_auth_entry(token, email=email)
     path = auth_dir / grok2api_auth_filename(entry, email=email)
     write_auth_json(path, key, entry)
@@ -1408,19 +1393,16 @@ def upload_cpa_auth_remote(
 
 
 def write_auth_json(path: Path, auth_key: str, entry: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     data = {auth_key: entry}
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    _ensure_private_file(path)
+    atomic_write_json(path, data)
 
 
 def merge_auth_json(path: Path, auth_key: str, entry: dict, unique: bool = True) -> None:
     """
     合并写入。unique=True 时 key 变成 issuer::client_id::user_id，避免多账号互相覆盖。
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     existing: dict = {}
     if path.exists():
         try:
@@ -1431,34 +1413,203 @@ def merge_auth_json(path: Path, auth_key: str, entry: dict, unique: bool = True)
     if unique and entry.get("user_id"):
         key = f"{auth_key}::{entry['user_id']}"
     existing[key] = entry
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    _ensure_private_file(path)
+    atomic_write_json(path, existing)
+
+
+@dataclass(frozen=True)
+class SsoInput:
+    sso: str
+    email: str = ""
+    password: str = ""
+    source: str = ""
+    raw_line: str = ""
+
+
+def parse_sso_line(line: str, source: str = "") -> SsoInput | None:
+    raw = str(line or "").strip()
+    if not raw or raw.startswith("#"):
+        return None
+    email = ""
+    password = ""
+    sso = raw
+    if "----" in raw:
+        parts = [part.strip() for part in raw.split("----")]
+        if len(parts) >= 3:
+            email = parts[0]
+            password = "----".join(parts[1:-1])
+            sso = parts[-1]
+        elif len(parts) == 2:
+            email, sso = parts
+    if sso.startswith("sso="):
+        sso = sso[4:].strip()
+    if len(sso) < 24 or any(ch.isspace() for ch in sso):
+        return None
+    return SsoInput(
+        sso=sso,
+        email=email,
+        password=password,
+        source=source,
+        raw_line=raw,
+    )
+
+
+def _dedupe_sso_inputs(records: list[SsoInput]) -> list[SsoInput]:
+    by_sso: dict[str, SsoInput] = {}
+    order: list[str] = []
+    for record in records:
+        previous = by_sso.get(record.sso)
+        if previous is None:
+            order.append(record.sso)
+            by_sso[record.sso] = record
+            continue
+        by_sso[record.sso] = SsoInput(
+            sso=record.sso,
+            email=previous.email or record.email,
+            password=previous.password or record.password,
+            source=previous.source or record.source,
+            raw_line=previous.raw_line or record.raw_line,
+        )
+    return [by_sso[sso] for sso in order]
+
+
+def load_sso_records(
+    path: str | None = None,
+    single: str | None = None,
+    accounts_dir: str | None = None,
+) -> list[SsoInput]:
+    records: list[SsoInput] = []
+    if single:
+        parsed = parse_sso_line(single, source="command-line")
+        return [parsed] if parsed else []
+    paths: list[Path] = []
+    locked_paths: set[Path] = set()
+    if path:
+        explicit_path = Path(path)
+        paths.append(explicit_path)
+        locked_paths.add(explicit_path.resolve())
+    if accounts_dir:
+        account_root = Path(accounts_dir)
+        if account_root.is_dir():
+            for candidate in sorted(account_root.glob("*.txt")):
+                if candidate.name in {"mail_credentials.txt", "sso_risk_rejected.txt"}:
+                    continue
+                paths.append(candidate)
+    for input_path in paths:
+        try:
+            if input_path.resolve() in locked_paths or input_path.name == "sso_pending.txt":
+                with exclusive_file_lock(input_path.with_suffix(input_path.suffix + ".lock")):
+                    lines = input_path.read_text(encoding="utf-8").splitlines()
+            else:
+                lines = input_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            parsed = parse_sso_line(line, source=str(input_path))
+            if parsed:
+                records.append(parsed)
+    return _dedupe_sso_inputs(records)
 
 
 def load_sso_list(path: str | None, single: str | None) -> list[str]:
-    if single:
-        return [single.strip()]
-    if not path:
-        return []
-    out = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    """Backward-compatible SSO-only loader."""
+    return [record.sso for record in load_sso_records(path=path, single=single)]
+
+
+def consume_successful_records(path: str | Path, succeeded_ssos: set[str]) -> int:
+    queue_path = Path(path)
+    if not queue_path.exists():
+        return 0
+    with exclusive_file_lock(queue_path.with_suffix(queue_path.suffix + ".lock")):
+        if not succeeded_ssos:
+            lines = queue_path.read_text(encoding="utf-8").splitlines()
+            return sum(1 for line in lines if parse_sso_line(line, source=str(queue_path)))
+        kept: list[str] = []
+        for line in queue_path.read_text(encoding="utf-8").splitlines():
+            parsed = parse_sso_line(line, source=str(queue_path))
+            if parsed and parsed.sso in succeeded_ssos:
+                continue
+            kept.append(line)
+        body = "\n".join(kept)
+        if body:
+            body += "\n"
+        atomic_write_text(queue_path, body)
+    return len(load_sso_records(path=str(queue_path)))
+
+
+def _resolve_config_path(base: Path, value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return str(path.resolve())
+
+
+def apply_config_defaults(args) -> None:
+    if not args.from_config:
+        args.prefer = args.prefer or "device"
+        return
+    config_path = Path(args.from_config).expanduser().resolve()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    base = config_path.parent
+    if not args.cpa_auth_dir:
+        args.cpa_auth_dir = _resolve_config_path(base, config.get("cpa_auth_dir"))
+    if not args.grok2api_auth_dir:
+        args.grok2api_auth_dir = _resolve_config_path(base, config.get("grok2api_auth_dir"))
+    args.cpa_remote_url = args.cpa_remote_url or str(config.get("cpa_remote_url") or "").strip()
+    args.cpa_management_key = args.cpa_management_key or str(config.get("cpa_management_key") or "").strip()
+    args.proxy = args.proxy or str(config.get("proxy") or "").strip()
+    if not args.prefer:
+        mode = str(config.get("cpa_token_mode") or "device_protocol")
+        args.prefer = "auth_code" if mode == "auth_code" else "device"
+
+
+def should_create_default_out_dir(args, record_count: int) -> bool:
+    has_target = any(
+        (
+            args.out,
+            args.out_dir,
+            args.cpa_auth_dir,
+            args.cpa_remote_url,
+            args.grok2api_auth_dir,
+        )
+    )
+    return record_count > 1 and not has_target and not args.merge
+
+
+def _mask_report_email(email: str) -> str:
+    value = str(email or "").strip()
+    if "@" not in value:
+        return ""
+    local, _, domain = value.partition("@")
+    return f"{local[:2]}***@{domain}" if local else f"***@{domain}"
+
+
+def existing_cpa_emails(auth_dir: str | Path | None) -> set[str]:
+    if not auth_dir:
+        return set()
+    root = Path(auth_dir)
+    if not root.is_dir():
+        return set()
+    emails: set[str] = set()
+    for path in root.glob("xai-*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        # 兼容 邮箱----密码----sso
-        if "----" in line:
-            parts = line.split("----")
-            line = parts[-1].strip()
-        out.append(line)
-    return out
+        email = str(data.get("email") or "").strip().lower()
+        if email:
+            emails.add(email)
+    return emails
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SSO cookie → grok auth.json (纯 HTTP)")
     ap.add_argument("--sso", metavar="FILE", help="sso 列表文件（一行一个 JWT，或 邮箱----密码----sso）")
     ap.add_argument("--sso-cookie", metavar="JWT", help="单个 sso cookie")
+    ap.add_argument("--accounts-dir", metavar="DIR", help="扫描 accounts 目录内可恢复的 txt 账号")
+    ap.add_argument("--from-config", metavar="FILE", help="从 config.json 读取 CPA、Grok2API 和代理默认值")
     ap.add_argument("--out", default=None, help="输出 auth.json 路径（单账号或 --merge）")
     ap.add_argument(
         "--out-dir",
@@ -1495,7 +1646,7 @@ def main() -> int:
     ap.add_argument(
         "--prefer",
         choices=("device", "auth_code"),
-        default="device",
+        default=None,
         help="换 token 优先路径：device（默认）或 auth_code",
     )
     ap.add_argument(
@@ -1504,20 +1655,44 @@ def main() -> int:
         help="禁用换 token 回退（仅用 --prefer 指定路径）",
     )
     ap.add_argument("--proxy", default="", help="OAuth 请求走代理，如 http://127.0.0.1:7890")
+    ap.add_argument("--consume-success", action="store_true", help="成功后从 --sso 队列原子移除对应记录")
+    ap.add_argument("--report-json", default=None, help="写入不含 token 的运行摘要 JSON")
     args = ap.parse_args()
 
-    cookies = load_sso_list(args.sso, args.sso_cookie)
-    if not cookies:
-        ap.error("需要 --sso 或 --sso-cookie")
+    apply_config_defaults(args)
+    records = load_sso_records(
+        path=args.sso,
+        single=args.sso_cookie,
+        accounts_dir=args.accounts_dir,
+    )
+    if not records:
+        ap.error("需要有效的 --sso、--sso-cookie 或 --accounts-dir")
+    if args.consume_success and not args.sso:
+        ap.error("--consume-success 只能与 --sso FILE 一起使用")
+    if args.merge and not args.out:
+        ap.error("--merge 必须同时指定 --out")
 
     if args.cpa_remote_url and not args.cpa_management_key:
         ap.error("使用 --cpa-remote-url 时必须同时提供 --cpa-management-key")
     if args.cpa_management_key and not args.cpa_remote_url:
         ap.error("使用 --cpa-management-key 时必须同时提供 --cpa-remote-url")
 
-    if len(cookies) > 1 and not args.out_dir and not args.merge:
-        # 默认批量写目录
-        args.out_dir = args.out_dir or "./auth_out"
+    input_count = len(records)
+    existing_emails = existing_cpa_emails(args.cpa_auth_dir)
+    already_present = [
+        record
+        for record in records
+        if record.email and record.email.strip().lower() in existing_emails
+    ]
+    if already_present:
+        existing_ssos = {record.sso for record in already_present}
+        records = [record for record in records if record.sso not in existing_ssos]
+        if args.consume_success and args.sso:
+            consume_successful_records(args.sso, existing_ssos)
+        print(f"跳过已存在 CPA 的记录: {len(already_present)}")
+
+    if should_create_default_out_dir(args, len(records)):
+        args.out_dir = "./auth_out"
         print(f"批量模式默认 --out-dir {args.out_dir}")
 
     # 只指定 CPA 目标时不再默认写官方 ~/.grok/auth.json
@@ -1527,19 +1702,24 @@ def main() -> int:
         and not args.cpa_auth_dir
         and not args.cpa_remote_url
         and not args.grok2api_auth_dir
-        and len(cookies) == 1
+        and len(records) == 1
     ):
         args.out = str(Path.home() / ".grok" / "auth.json")
 
+    args.prefer = args.prefer or "device"
     print(
-        f"🚀 SSO → auth.json: {len(cookies)} 个, delay={args.delay}s, "
+        f"🚀 SSO → auth.json: {len(records)} 个待处理, delay={args.delay}s, "
         f"prefer={args.prefer}, fallback={not args.no_fallback}"
     )
     ok = 0
     fail = 0
+    succeeded_ssos: set[str] = set()
+    failures: list[dict] = []
 
-    for i, sso in enumerate(cookies, 1):
-        print(f"\n{'=' * 60}\n[{i}/{len(cookies)}] ...\n{'=' * 60}")
+    for i, record in enumerate(records, 1):
+        sso = record.sso
+        email = str(args.email or record.email or "").strip()
+        print(f"\n{'=' * 60}\n[{i}/{len(records)}] ...\n{'=' * 60}")
         try:
             state = inspect_sso_account_state(
                 sso,
@@ -1548,6 +1728,7 @@ def main() -> int:
             )
             if state.get("denied"):
                 fail += 1
+                failures.append({"index": i, "email": _mask_report_email(email), "reason": "registration-risk"})
                 print(
                     "  ❌ 注册风控拒绝，跳过三条 OAuth 路径: "
                     f"{state.get('bot_flag_details') or 'policy=deny,event=$registration'}"
@@ -1561,9 +1742,10 @@ def main() -> int:
             )
             if not token:
                 fail += 1
+                failures.append({"index": i, "email": _mask_report_email(email), "reason": "token-conversion"})
                 print(f"  ❌ [{i}] 失败")
                 continue
-            key, entry = token_to_auth_entry(token, email=args.email)
+            key, entry = token_to_auth_entry(token, email=email)
             uid = entry.get("user_id") or secrets.token_hex(4)
 
             if args.out_dir:
@@ -1571,7 +1753,7 @@ def main() -> int:
                 write_auth_json(p, key, entry)
                 print(f"  💾 {p}")
             if args.out:
-                if args.merge or len(cookies) > 1:
+                if args.merge or len(records) > 1:
                     merge_auth_json(Path(args.out), key, entry, unique=True)
                     print(f"  💾 merge → {args.out}")
                 else:
@@ -1579,33 +1761,59 @@ def main() -> int:
                     print(f"  💾 {args.out}")
 
             if args.grok2api_auth_dir:
-                gp = write_grok2api_auth(Path(args.grok2api_auth_dir), token, email=args.email)
+                gp = write_grok2api_auth(Path(args.grok2api_auth_dir), token, email=email)
                 print(f"  💾 Grok2API → {gp}")
 
             if args.cpa_auth_dir or args.cpa_remote_url:
-                record = token_to_cpa_record(token, email=args.email, sso=sso)
+                cpa_record = token_to_cpa_record(token, email=email, sso=sso)
                 if args.cpa_auth_dir:
-                    cp = write_cpa_auth(Path(args.cpa_auth_dir), record)
+                    cp = write_cpa_auth(Path(args.cpa_auth_dir), cpa_record)
                     print(f"  💾 CPA 本地 → {cp}")
                 if args.cpa_remote_url:
                     name = upload_cpa_auth_remote(
                         args.cpa_remote_url,
                         args.cpa_management_key,
-                        record,
+                        cpa_record,
                         proxy=args.proxy,
                     )
                     print(f"  💾 CPA 远程 → {args.cpa_remote_url.rstrip('/')}/.../{name}")
 
             ok += 1
+            succeeded_ssos.add(sso)
+            if args.consume_success and args.sso:
+                consume_successful_records(args.sso, {sso})
             print(f"  ✅ [{i}] 完成 user_id={uid[:12]}...")
         except Exception as e:
             fail += 1
+            try:
+                from webui.security_utils import redact_log_line
+
+                reason = redact_log_line(str(e))[:240]
+            except Exception:
+                reason = type(e).__name__
+            failures.append({"index": i, "email": _mask_report_email(email), "reason": reason})
             print(f"  ❌ [{i}] 异常: {e}")
 
-        if args.delay > 0 and i < len(cookies):
+        if args.delay > 0 and i < len(records):
             time.sleep(args.delay)
 
-    print(f"\n{'=' * 60}\n📊 完成: {ok}/{len(cookies)} 成功, {fail} 失败")
+    remaining = None
+    if args.consume_success and args.sso:
+        remaining = consume_successful_records(args.sso, succeeded_ssos)
+        print(f"  队列剩余 {remaining} 条")
+    report = {
+        "version": 1,
+        "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "input_count": input_count,
+        "skipped_existing_count": len(already_present),
+        "success_count": ok,
+        "failure_count": fail,
+        "remaining_count": remaining,
+        "failures": failures,
+    }
+    if args.report_json:
+        atomic_write_json(args.report_json, report)
+    print(f"\n{'=' * 60}\n📊 完成: {ok}/{len(records)} 成功, {fail} 失败")
     return 0 if fail == 0 else 1
 
 

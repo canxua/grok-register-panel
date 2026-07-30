@@ -1,8 +1,10 @@
-# Work roots for this hardening goal
+# Work Roots For This Release
 
-- **Public/hardening copy (edit here first):** `/data/compose/grok-register-panel-hardening`
-- **Self-use staged (apply after verify):** `/data/compose/grok-register-selfuse-staged`
-- **Live running (DO NOT edit mid-work):** `/data/compose/grok-register-camoufox` (active monitor/orch if any)
-- **Prior open-source mirror:** `/data/compose/grok-register-opensource`
+- **Reviewed development copy:** `/home/lijunjie/grok-register-panel-hardening-ui`
+- **Live self-use runtime:** `/data/compose/grok-register-camoufox`
+- **Synchronized hardening copy:** `/data/compose/grok-register-panel-hardening`
+- **Rollback snapshot:** `/data/backups/grok-register-release-20260730T044241Z`
 
-Cutover: copy staged files into live after review; restart monitor only when ready.
+Before cutover, migrate the legacy blacklist and verify no registration or
+recovery process is active. Synchronize code while excluding runtime state,
+then restart only the panel service and run the release checklist.

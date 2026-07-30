@@ -6,7 +6,10 @@ FORBIDDEN = "/data/compose/grok-register-camoufox"
 def test_no_live_path_in_key_modules():
     for rel in [
         "webui/blacklist_ops.py",
+        "webui/blacklist_store.py",
         "webui/monitor.py",
+        "webui/process_utils.py",
+        "webui/recovery_ops.py",
         "run_batch_headless.py",
         "run_until_100.py",
     ]:

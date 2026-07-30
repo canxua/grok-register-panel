@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.monitor
 config.json
 accounts/*
 !accounts/.gitkeep
@@ -12,11 +13,12 @@ grok2api_auth/*
 !grok2api_auth/.gitkeep
 log/*
 !log/.gitkeep
+auth_out/
 proxies.txt
 proxies*.txt
 !proxies.example.txt
 stickies*.txt
+.next_action_id.cache
 *.bak*
 *.fixed-keep
-.next_action_id.cache
 .DS_Store

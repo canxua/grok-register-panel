@@ -1,112 +1,145 @@
-# 本机部署
+# 部署指南
 
-以下步骤使用 Python 3.13 在仓库内创建 `.venv` 隔离环境。
+本文以 Linux 无头服务器为主，Python 3.10+ 可用；发布版本在 Python 3.14 环境完成验证。
 
-## 环境要求
-
-- Python 3.10+（推荐 3.13）
-- [Camoufox](https://camoufox.com/) 反检测浏览器（本机自动下载，无需安装 Chrome）
-- 可用的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- 能访问注册页、临时邮箱 API、`auth.x.ai` 的网络
-
-## 安装
-
-### 1. 创建虚拟环境并安装依赖
-
-```powershell
-uv python install 3.13
-uv venv --python 3.13 .venv
-uv pip install --python .venv\Scripts\python.exe -r requirements.txt
-```
-
-或使用标准 pip：
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 2. 下载 Camoufox 浏览器引擎
-
-依赖安装完成后，必须下载 Camoufox 浏览器引擎（约 300MB，首次安装时下载）：
-
-```powershell
-# Windows
-camoufox fetch
-
-# macOS / Linux
-python3 -m camoufox fetch
-```
-
-> 注意：`pip install camoufox[geoip]` 只安装了 Python 库，浏览器引擎需要额外执行 `camoufox fetch` 下载。
-> `[geoip]` 额外依赖会下载 MaxMind GeoLite2 数据库，用于根据代理 IP 自动匹配时区、语言和经纬度，强烈推荐安装。
-
-### 3. 验证安装
-
-```powershell
-camoufox version
-```
-
-输出应显示 Python 包版本、浏览器版本和安装状态（`Installed: Yes`）。
-
-### 4. 配置
-
-```powershell
-cp config.example.json config.json
-```
-
-编辑 `config.json`，至少填写可用的临时邮箱配置：
-
-- Cloudflare：`cloudflare_api_base`、`defaultDomains`，必要时填写认证配置
-- DuckMail：将 `email_provider` 改为 `duckmail` 并填写 `duckmail_api_key`
-- YYDS：将 `email_provider` 改为 `yyds` 并填写 `yyds_api_key` 或 `yyds_jwt`
-
-如需自动写入 CLIProxyAPI，再配置 `cpa_auto_add` 及本地 auth 目录或远程 Management API 参数。
-
-## 启动
-
-- 图形界面：双击 ``python grok_register_ttk.py` (GUI)`
-- 命令行：双击 ``python run_batch_headless.py <n> <workers>``，输入 `start` 后开始任务
-
-## Camoufox 常用命令
-
-```powershell
-camoufox fetch          # 下载/更新浏览器引擎
-camoufox version        # 查看版本和安装状态
-camoufox list           # 列出已安装版本
-camoufox remove         # 卸载浏览器引擎
-camoufox path           # 查看安装路径
-```
-
-## 故障排查
-
-**`BrowserType.launch_persistent_context() got an unexpected keyword argument`**
-
-Camoufox 版本过旧，升级到最新版：
-
-```powershell
-pip install -U camoufox[geoip]
-camoufox fetch
-```
-
-**`official/stable is not installed`**
-
-浏览器引擎未下载，执行 `camoufox fetch`。
-
-**旧格式安装兼容**
-
-如果 `camoufox fetch` 安装的是旧格式（无 `.0.5_FLAG` 文件），程序会自动检测 `executable_path` 绕过版本检查，无需额外操作。确保 `config.json` 中 `active_version` 设为 `"."`。
-
-## Panel token (required for start/stop)
+## 1. 安装
 
 ```bash
-export MONITOR_TOKEN="$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")"
-export MONITOR_HOST=127.0.0.1
-export MONITOR_PORT=8787
-# optional: export PANEL_INCLUDE_TAIL=1
-python webui/monitor.py
+git clone https://github.com/lij768423-svg/grok-register-panel.git
+cd grok-register-panel
+
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m camoufox fetch
 ```
 
-In the browser, paste the same token into **面板 Token** (saved to localStorage).
-Without it, POST /api/start returns 401.
+`requirements.txt` 固定直接依赖版本；`requirements.lock.txt` 是发布环境的完整依赖快照。
+
+验证：
+
+```bash
+.venv/bin/python -m pip check
+.venv/bin/python -m camoufox version
+```
+
+## 2. 配置
+
+```bash
+cp config.example.json config.json
+chmod 600 config.json
+```
+
+至少配置邮箱服务。需要自动写入 CPA 时，设置：
+
+- `cpa_auto_add`
+- `cpa_auth_dir`
+- `grok2api_auth_dir`
+- 可选的 `cpa_remote_url` 与 `cpa_management_key`
+
+代理池与 sticky 文件均属于凭据材料。运行权限脚本会将 `proxies*.txt`、
+`stickies*.txt`、缓存文件及 `.env.monitor` 收紧为 `0600`。
+
+## 3. 发布前检查
+
+```bash
+PYTHON_BIN=.venv/bin/python scripts/run_tests.sh
+.venv/bin/python scripts/harden_runtime_permissions.py .
+```
+
+如果旧版本曾把自动 ASN 黑名单写入 `browser_session.py`，覆盖代码前先迁移：
+
+```bash
+.venv/bin/python scripts/migrate_legacy_blacklist.py \
+  --source browser_session.py \
+  --state log/blacklist_state.json
+```
+
+## 4. 临时启动面板
+
+```bash
+export MONITOR_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export MONITOR_HOST=127.0.0.1
+export MONITOR_PORT=8787
+export PANEL_INCLUDE_TAIL=0
+export CPA_AUTH_DIR="$PWD/cpa_auth"
+
+.venv/bin/python -u webui/monitor.py
+```
+
+局域网或 Tailscale 部署时，将 `MONITOR_HOST` 设置为目标网卡的具体 IP；不要使用 `0.0.0.0`。浏览器打开面板后，在“访问令牌”输入与环境变量相同的值。
+
+## 5. systemd 持久运行
+
+复制并按实际用户和目录修改：
+
+```bash
+sudo cp deploy/grok-register-panel.service.example /etc/systemd/system/grok-register-panel.service
+sudo cp deploy/monitor.env.example /etc/grok-register-panel.env
+sudo chmod 600 /etc/grok-register-panel.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now grok-register-panel.service
+```
+
+服务必须满足：
+
+- `UMask=0077`
+- `PANEL_INCLUDE_TAIL=0`
+- 绑定具体 loopback、LAN 或 Tailscale IP
+- `MONITOR_TOKEN` 使用至少 32 字节随机值
+- `Restart=on-failure`
+
+验证：
+
+```bash
+systemctl status grok-register-panel.service --no-pager
+curl http://目标地址:8787/api/health
+curl -o /dev/null -w '%{http_code}\n' http://目标地址:8787/api/status
+curl -H "Authorization: Bearer $MONITOR_TOKEN" http://目标地址:8787/api/status
+```
+
+第二条状态接口在未带 Token 时应返回 `401`。
+
+## 6. 运行任务
+
+单批：
+
+```bash
+xvfb-run -a .venv/bin/python -u run_batch_headless.py 20 3
+```
+
+辅助脚本：
+
+```bash
+scripts/run_xvfb_smoke.sh 1
+scripts/run_xvfb_batch.sh 10
+```
+
+持续编排建议从面板启动；停止操作只会结束当前项目目录下的编排和批处理进程。
+
+## 7. 账号补录
+
+面板的“账号补录”支持：
+
+- `sso_pending.txt` 补录，成功后立即出队
+- 扫描全部 `accounts/*.txt`
+- 跳过本地 CPA 已存在邮箱
+- 停止正在运行的补录进程
+
+命令行：
+
+```bash
+.venv/bin/python sso_to_auth_json.py \
+  --sso accounts/sso_pending.txt \
+  --from-config config.json \
+  --consume-success \
+  --report-json log/recovery_report.json
+```
+
+## 8. 安全边界
+
+- `/api/health` 和静态页面可匿名访问；运行数据 API 在配置 Token 后要求鉴权。
+- 不要通过公网裸露内置 HTTP 服务。公网访问应放在有 TLS 和额外身份认证的反向代理后。
+- 生产环境不要启用原始日志尾部。
+- 不要把 Token 写入 URL、命令行参数、仓库或 issue。
+- 面板使用内置 HTTP 服务，适合单机、LAN 或 tailnet 运维，不替代互联网边界网关。

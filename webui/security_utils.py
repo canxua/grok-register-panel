@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import hmac
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -73,13 +74,7 @@ def check_token(provided: Optional[str]) -> bool:
     exp = expected_token()
     if not exp:
         return False
-    got = extract_bearer(provided)
-    if len(got) != len(exp):
-        return False
-    acc = 0
-    for a, b in zip(got, exp):
-        acc |= ord(a) ^ ord(b)
-    return acc == 0
+    return hmac.compare_digest(extract_bearer(provided), exp)
 
 
 def check_token_optional_read(provided: Optional[str], *, write: bool) -> bool:
@@ -95,3 +90,36 @@ def check_token_optional_read(provided: Optional[str], *, write: bool) -> bool:
     if not exp:
         return True
     return check_token(provided)
+
+
+_EMAIL_RE = re.compile(r"(?<![\w.+-])([\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![\w.-])")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b")
+_PROXY_RE = re.compile(r"\b(?:https?|socks5h?)://[^\s]+")
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(access_token|refresh_token|id_token|sso|password|passwd|secret|api_key|management_key|token)"
+    r"([\"']?\s*[:=]\s*[\"']?)([^\s,;\"'&]{8,})"
+)
+
+
+def redact_log_line(line: str) -> str:
+    """Remove credentials and account identifiers from a display log line."""
+    text = _ANSI_RE.sub("", str(line or ""))
+    text = _JWT_RE.sub("[redacted-token]", text)
+    text = re.sub(
+        r"(?i)\b(Bearer\s+)[A-Za-z0-9._~-]{12,}",
+        r"\1[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)((?:user_code|verification code|验证码)[^A-Z0-9\r\n]{0,32})[A-Z0-9]{3}-[A-Z0-9]{3}\b",
+        r"\1[redacted]",
+        text,
+    )
+    text = _SECRET_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+        text,
+    )
+    text = _EMAIL_RE.sub(lambda match: mask_email(match.group(1)), text)
+    text = _PROXY_RE.sub(lambda match: redact_proxy(match.group(0)), text)
+    return text
