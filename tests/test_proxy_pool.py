@@ -23,6 +23,7 @@ def test_absolute_proxy_file_is_loaded_and_deduplicated():
             "socks5://HOST:1080\n",
             encoding="utf-8",
         )
+        pool_file.chmod(0o600)
         result = load_proxy_urls(
             {"proxy_file": str(pool_file), "proxy": "http://FALLBACK:8080"},
             root,
@@ -79,6 +80,7 @@ def test_connectivity_uses_first_proxy_from_configured_pool():
             "http://FIRST:3129\nhttp://SECOND:3129\n",
             encoding="utf-8",
         )
+        pool_file.chmod(0o600)
         seen = []
         original_proxy = connectivity.check_proxy
         original_signup = connectivity.check_xai_signup
