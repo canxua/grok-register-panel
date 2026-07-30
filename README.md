@@ -102,6 +102,7 @@ cp config.example.json config.json
 | `moemail_domain` | 可选固定域名；留空时自动读取 `/api/config` 的可用域名 |
 | `moemail_expiry_ms` | `3600000` / `86400000` / `604800000` / `0`，分别为 1 小时、1 天、7 天、永久 |
 | `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
+| `proxy_file` | 可选代理池路径；支持绝对路径或项目内相对路径，优先于 `proxy` |
 | `proxies.txt` | 可选；多行代理，多 worker 轮换端口 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
 | `register_count` | 单次目标数量 |
@@ -255,6 +256,9 @@ python sso_to_auth_json.py \
 4. 并发建议从 2～3 起跳，过高易空页、Turnstile 卡住、代理打满  
 5. 「资料填写失败」有时是资料页人机未过，不一定是姓名密码写不进  
 6. 链式代理在客户端配，不在注册机 Python 里写死  
+
+Cloudflare Worker 的 `defaultDomains` 默认按原值创建邮箱。只有邮件系统已经配置
+对应 wildcard/catch-all 时，才将 `cloudflare_randomize_subdomain` 设为 `true`。
 
 ## 目录结构
 

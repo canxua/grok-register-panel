@@ -40,6 +40,11 @@ chmod 600 config.json
 代理池与 sticky 文件均属于凭据材料。运行权限脚本会将 `proxies*.txt`、
 `stickies*.txt`、缓存文件及 `.env.monitor` 收紧为 `0600`。
 
+如代理池由同机其它服务维护，在 `config.json` 设置绝对路径 `proxy_file`；该文件
+优先于单条 `proxy`，面板启动预检和实际 worker 会读取同一代理池。Cloudflare
+Worker 邮箱默认严格使用 `defaultDomains`，仅在邮件路由支持 wildcard/catch-all
+时开启 `cloudflare_randomize_subdomain`。
+
 ## 3. 发布前检查
 
 ```bash

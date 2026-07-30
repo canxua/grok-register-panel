@@ -74,11 +74,12 @@ def create_temp_address(
     auth_mode: str = "none",
     custom_auth: str = "",
     name: str = "",
+    randomize_subdomain: bool = False,
 ) -> tuple[str, str]:
     path = accounts_path if accounts_path.startswith("/") else f"/{accounts_path}"
     url = f"{api_base.rstrip('/')}{path}"
-    # 根域批量易被标；默认挂随机子域（需 CF Email Routing 对 *.apex catch-all）
-    if domain:
+    # Only randomize when the mailbox route explicitly supports wildcard domains.
+    if domain and randomize_subdomain:
         domain = random_subdomain_domain(domain)
     if is_admin_create_path(path):
         payload = {"name": name or generate_username(10), "enablePrefix": False}

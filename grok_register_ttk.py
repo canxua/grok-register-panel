@@ -41,6 +41,7 @@ from email_providers import yyds as yyds_provider
 from email_providers.common import extract_verification_code as _extract_code
 from email_providers.common import generate_username as _generate_username
 from email_providers.common import pick_list_payload as _pick_list
+from proxy_pool import load_proxy_urls
 
 import browser_session as _bs
 import register_flow as _rf
@@ -189,7 +190,9 @@ DEFAULT_CONFIG = {
     "cloudflare_path_accounts": "/api/new_address",
     "cloudflare_path_token": "/api/token",
     "cloudflare_path_messages": "/api/mails",
+    "cloudflare_randomize_subdomain": False,
     "proxy": "http://127.0.0.1:7890",
+    "proxy_file": "",
     "enable_nsfw": True,
     "debug_mode": False,
     "close_browser_on_stop": False,
@@ -545,31 +548,9 @@ _proxy_pool_lock = threading.Lock()
 
 
 def load_proxy_pool(path: str = "") -> list:
-    """从 proxies.txt 加载 http://... 列表；空则回落 config.proxy。"""
+    """加载配置的代理池；空则回落项目 proxies.txt 或 config.proxy。"""
     global _proxy_pool
-    candidates = []
-    if path:
-        candidates.append(Path(path))
-    candidates.append(Path(APP_DIR) / "proxies.txt")
-    pool = []
-    for fp in candidates:
-        try:
-            if not fp.is_file():
-                continue
-            for line in fp.read_text(encoding="utf-8").splitlines():
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                if s.startswith("http://") or s.startswith("socks5://") or s.startswith("socks5h://"):
-                    pool.append(s)
-            if pool:
-                break
-        except Exception:
-            continue
-    if not pool:
-        single = str(config.get("proxy", "") or "").strip()
-        if single:
-            pool = [single]
+    pool = load_proxy_urls(config, APP_DIR, explicit_path=path)
     _proxy_pool = pool
     return pool
 
@@ -704,6 +685,7 @@ def cloudflare_create_temp_address(api_base):
         auth_mode=get_cloudflare_auth_mode(),
         custom_auth=get_cloudflare_custom_auth(),
         name=generate_username(10),
+        randomize_subdomain=bool(config.get("cloudflare_randomize_subdomain", False)),
     )
 
 

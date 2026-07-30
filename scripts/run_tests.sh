@@ -9,6 +9,8 @@ tests=(
   tests/test_security_utils.py
   tests/test_extract_code.py
   tests/test_moemail.py
+  tests/test_cloudflare_provider.py
+  tests/test_proxy_pool.py
   tests/test_runtime_security.py
   tests/test_sso_recovery.py
   tests/test_monitor_http.py
@@ -24,6 +26,7 @@ done
 
 "$PYTHON_BIN" -m compileall -q \
   secure_files.py \
+  proxy_pool.py \
   webui \
   email_providers \
   browser_session.py \

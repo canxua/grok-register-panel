@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import socket
 import time
+from pathlib import Path
 from typing import Callable, List, Tuple
 from urllib.parse import urlparse
 
 from email_providers import cloudflare as cloudflare_provider
+from proxy_pool import ProxyPoolError, load_proxy_urls
 
 CheckResult = Tuple[str, bool, str]  # name, ok, detail
 XAI_SIGNUP_CHECK_NAME = "xAI注册页"
@@ -307,9 +309,18 @@ def check_cpa(config: dict, http_get: Callable) -> CheckResult:
 
 def run_connectivity_checks(config: dict, http_get: Callable, http_post: Callable) -> List[CheckResult]:
     results = []
-    proxy = str(config.get("proxy", "") or "")
-    results.append(check_proxy(proxy, http_get))
-    results.append(check_xai_signup(proxy, http_get))
+    try:
+        proxy_pool = load_proxy_urls(config, Path(__file__).resolve().parent)
+        proxy = proxy_pool[0] if proxy_pool else ""
+        proxy_result = check_proxy(proxy, http_get)
+        if len(proxy_pool) > 1:
+            name, ok, detail = proxy_result
+            proxy_result = name, ok, f"{detail}；代理池 {len(proxy_pool)} 条，已抽样首条"
+        results.append(proxy_result)
+        results.append(check_xai_signup(proxy, http_get))
+    except ProxyPoolError as exc:
+        results.append(("代理", False, f"代理池配置错误: {exc}"))
+        results.append((XAI_SIGNUP_CHECK_NAME, False, "代理池配置错误，未执行注册页探测"))
     results.append(
         check_email_api(
             str(config.get("email_provider", "") or ""),
