@@ -149,6 +149,43 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
                     f"Cloudflare 直建模式可用（建号端点 {accounts_path}）",
                 )
 
+            if (
+                auth_mode.lower() == "x-admin-auth"
+                and accounts_path.rstrip("/").lower() == "/admin/new_address"
+            ):
+                # This route accepts POST only. A GET moves from 401 without the
+                # admin header to 404/405 after authentication, without creating
+                # a mailbox as a side effect.
+                url = f"{base}{accounts_path}"
+                unauthenticated = http_get(url, headers={}, timeout=10)
+                headers = cloudflare_provider.build_headers(
+                    api_key,
+                    auth_mode,
+                    custom_auth,
+                )
+                authenticated = http_get(url, headers=headers, timeout=10)
+                unauth_status = int(unauthenticated.status_code)
+                auth_status = int(authenticated.status_code)
+                if auth_status in (401, 403):
+                    return (
+                        "邮箱API",
+                        False,
+                        f"Cloudflare 管理鉴权失败 HTTP {auth_status}",
+                    )
+                if unauth_status in (401, 403) and auth_status in (404, 405):
+                    return (
+                        "邮箱API",
+                        True,
+                        f"Cloudflare 管理鉴权通过 HTTP {auth_status}（GET 只读探测）",
+                    )
+                if auth_status >= 400:
+                    return (
+                        "邮箱API",
+                        False,
+                        f"Cloudflare 管理端点异常 HTTP {auth_status}",
+                    )
+                return "邮箱API", True, f"Cloudflare 管理端点可达 HTTP {auth_status}"
+
             # auth_mode != none：检查 domains 鉴权是否正确
             path = str(config.get("cloudflare_path_domains", "/api/domains") or "/api/domains")
             if not path.startswith("/"):

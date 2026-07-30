@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from email_providers import cloudflare
+import connectivity
 
 
 class FakeResponse:
@@ -103,8 +104,39 @@ def test_message_list_and_detail_protocol():
     assert calls[1][0] == "https://mail.example/api/mail/message-id"
 
 
+def test_admin_connectivity_probe_is_read_only_and_auth_aware():
+    calls = []
+
+    def http_get(url, **kwargs):
+        calls.append((url, kwargs))
+        headers = kwargs.get("headers", {})
+        response = FakeResponse({})
+        response.status_code = 404 if headers.get("x-admin-auth") == "admin-secret" else 401
+        return response
+
+    result = connectivity.check_email_api(
+        "cloudflare",
+        {
+            "cloudflare_api_base": "https://mail.example",
+            "cloudflare_api_key": "admin-secret",
+            "cloudflare_auth_mode": "x-admin-auth",
+            "cloudflare_path_accounts": "/admin/new_address",
+        },
+        http_get,
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert result[1] is True
+    assert "管理鉴权通过" in result[2]
+    assert [item[1]["headers"] for item in calls] == [
+        {},
+        {"x-admin-auth": "admin-secret"},
+    ]
+
+
 if __name__ == "__main__":
     test_admin_create_keeps_exact_domain_by_default()
     test_subdomain_randomization_is_opt_in()
     test_message_list_and_detail_protocol()
+    test_admin_connectivity_probe_is_read_only_and_auth_aware()
     print("OK cloudflare provider")
