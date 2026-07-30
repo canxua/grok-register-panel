@@ -5,8 +5,18 @@ Grok 注册机 - TTK GUI 版本
 整合 openai_register.py, batch_open_nsfw.py（原 DrissionPage 已替换为 Camoufox）
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+try:
+    import tkinter as tk
+    from tkinter import messagebox, scrolledtext, ttk
+except ImportError as exc:
+    # Server/headless deployments do not need the optional Tk runtime.
+    tk = None
+    ttk = None
+    messagebox = None
+    scrolledtext = None
+    _TK_IMPORT_ERROR = exc
+else:
+    _TK_IMPORT_ERROR = None
 import threading
 import datetime
 import time
@@ -2014,7 +2024,9 @@ def tk_entry(parent, textvariable=None, width=30, **kwargs):
     )
 
 
-def tk_button(parent, text="", command=None, state=tk.NORMAL, **kwargs):
+def tk_button(parent, text="", command=None, state=None, **kwargs):
+    if state is None:
+        state = tk.NORMAL
     return tk.Button(
         parent,
         text=text,
@@ -3817,6 +3829,10 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ("start", "cli", "--cli"):
         main_cli()
         return
+    if tk is None:
+        raise RuntimeError(
+            "Tkinter is required only for desktop GUI mode; use the web panel or CLI mode"
+        ) from _TK_IMPORT_ERROR
     root = tk.Tk()
     setup_light_theme(root)
     app = GrokRegisterGUI(root)

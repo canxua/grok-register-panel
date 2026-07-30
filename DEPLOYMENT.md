@@ -45,6 +45,8 @@ chmod 600 config.json
 Worker 邮箱默认严格使用 `defaultDomains`，仅在邮件路由支持 wildcard/catch-all
 时开启 `cloudflare_randomize_subdomain`。
 
+Web/CLI 服务器路径不依赖 Tkinter；`tkinter` 仅是本机桌面 GUI 模式的可选依赖。
+
 ## 3. 发布前检查
 
 ```bash

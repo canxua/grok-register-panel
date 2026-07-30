@@ -11,6 +11,7 @@ tests=(
   tests/test_moemail.py
   tests/test_cloudflare_provider.py
   tests/test_proxy_pool.py
+  tests/test_headless_import.py
   tests/test_runtime_security.py
   tests/test_sso_recovery.py
   tests/test_monitor_http.py
