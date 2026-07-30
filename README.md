@@ -64,6 +64,10 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 
 说明：**注册机本身只配置一层 HTTP 代理 URL**。若需要「先节点再家宽」等链式出口，在代理客户端（如 mihomo `dialer-proxy`）配置，对注册机透明。
 
+当前 OVH 实测架构、完整注册状态机、故障根因、耗时基线与目标架构见
+[注册系统架构与运行流程](docs/OPERATIONS_ARCHITECTURE.md)。该文档会区分已经部署的
+能力、社区经验和仍待实现的设计，避免把目标架构误写成线上现状。
+
 ## 快速开始
 
 ### 环境
@@ -283,6 +287,7 @@ Cloudflare Worker 的 `defaultDomains` 默认按原值创建邮箱。只有邮�
 ├── email_providers/
 ├── tests/                     # 结构 / 脱敏 / chdir 冒烟
 ├── scripts/                   # xvfb 辅助脚本
+├── docs/OPERATIONS_ARCHITECTURE.md  # 当前架构、注册流程、耗时与目标架构
 ├── config.example.json
 ├── proxies.example.txt
 ├── requirements.txt
