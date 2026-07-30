@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -14,6 +15,33 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from webui import monitor
+
+
+def test_control_defaults_are_single_account_batch():
+    previous = monitor.CONTROL_FILE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            monitor.CONTROL_FILE = Path(tmp) / "monitor_control.json"
+            control = monitor.load_control()
+            assert control["workers"] == 1
+            assert control["batch_count"] == 1
+            assert control["add_count"] == 1
+            assert control["mode"] == "batch"
+
+            control = monitor.save_control(
+                {
+                    "workers": "invalid",
+                    "batch_count": "invalid",
+                    "add_count": "invalid",
+                    "mode": "invalid",
+                }
+            )
+            assert control["workers"] == 1
+            assert control["batch_count"] == 1
+            assert control["add_count"] == 1
+            assert control["mode"] == "batch"
+    finally:
+        monitor.CONTROL_FILE = previous
 
 
 def request(url: str, *, token: str = "", method: str = "GET", body: bytes | None = None):
@@ -101,6 +129,7 @@ def test_non_loopback_requires_token():
 
 
 if __name__ == "__main__":
+    test_control_defaults_are_single_account_batch()
     test_monitor_http_auth_and_headers()
     test_non_loopback_requires_token()
     print("OK monitor http")

@@ -106,11 +106,11 @@ def _write_json(path: Path, data: dict):
 def load_control() -> dict:
     with CONTROL_LOCK:
         c = _read_json(CONTROL_FILE, {})
-        c.setdefault("workers", 3)
+        c.setdefault("workers", 1)
         c.setdefault("risk_pause", 10)
-        c.setdefault("batch_count", 40)
-        c.setdefault("add_count", 40)  # 再跑 N 个
-        c.setdefault("mode", "orch")  # orch | batch
+        c.setdefault("batch_count", 1)
+        c.setdefault("add_count", 1)  # 再跑 N 个
+        c.setdefault("mode", "batch")  # orch | batch
         return c
 
 
@@ -128,22 +128,22 @@ def save_control(updates: dict) -> dict:
         c = load_control()
         c.update({key: value for key, value in (updates or {}).items() if key in allowed})
         try:
-            c["workers"] = max(1, min(24, int(c.get("workers", 3))))
+            c["workers"] = max(1, min(24, int(c.get("workers", 1))))
         except Exception:
-            c["workers"] = 3
+            c["workers"] = 1
         try:
             c["risk_pause"] = max(1, min(50, int(c.get("risk_pause", 10))))
         except Exception:
             c["risk_pause"] = 10
         try:
-            c["batch_count"] = max(1, min(200, int(c.get("batch_count", 40))))
+            c["batch_count"] = max(1, min(200, int(c.get("batch_count", 1))))
         except Exception:
-            c["batch_count"] = 40
+            c["batch_count"] = 1
         try:
-            c["add_count"] = max(1, min(500, int(c.get("add_count", 40))))
+            c["add_count"] = max(1, min(500, int(c.get("add_count", 1))))
         except Exception:
-            c["add_count"] = 40
-        c["mode"] = c.get("mode") if c.get("mode") in ("orch", "batch") else "orch"
+            c["add_count"] = 1
+        c["mode"] = c.get("mode") if c.get("mode") in ("orch", "batch") else "batch"
         for key in ("base_cpa", "target_cpa"):
             if c.get(key) is None or str(c.get(key)).strip() == "":
                 c.pop(key, None)
@@ -582,7 +582,7 @@ def _start_orch_unlocked():
         c["base_cpa"] = now
         c["target_cpa"] = now + add_count
     elif target is None or target <= now:
-        n = int(c.get("batch_count") or 40)
+        n = int(c.get("batch_count") or 1)
         c["add_count"] = n
         c["base_cpa"] = now
         c["target_cpa"] = now + n
@@ -644,8 +644,8 @@ def _start_batch_only_unlocked():
     if prerequisite_error:
         return {"ok": False, "error": prerequisite_error}
     c = load_control()
-    workers = int(c.get("workers") or 3)
-    count = int(c.get("batch_count") or 40)
+    workers = int(c.get("workers") or 1)
+    count = int(c.get("batch_count") or 1)
     now = cpa_count()
     c["base_cpa"] = now
     c["target_cpa"] = now + count
@@ -703,7 +703,7 @@ def snapshot():
         rates = success_stats().get("rates") or {}
     except Exception:
         rates = {}
-    target = parsed.get("count_target") or control.get("batch_count") or 40
+    target = parsed.get("count_target") or control.get("batch_count") or 1
     ok = parsed.get("ok") or 0
     fail = parsed.get("fail") or 0
     done = ok + fail
@@ -1435,17 +1435,17 @@ HTML = r"""<!DOCTYPE html>
         <label for="mode">运行模式</label>
         <select id="mode">
           <option value="orch">持续编排</option>
-          <option value="batch">单批运行</option>
+          <option value="batch" selected>单批运行</option>
         </select>
       </div>
       <div class="field"><label for="workers-input">并发数</label>
-        <input type="number" id="workers-input" min="1" max="24" value="3"/>
+        <input type="number" id="workers-input" min="1" max="24" value="1"/>
       </div>
       <div class="field"><label for="batch_count">单批数量</label>
-        <input type="number" id="batch_count" min="1" max="200" value="40"/>
+        <input type="number" id="batch_count" min="1" max="200" value="1"/>
       </div>
       <div class="field"><label for="add_count">追加目标</label>
-        <input type="number" id="add_count" min="1" max="500" value="40" title="每次启动从当前 CPA 再注册 N 个"/>
+        <input type="number" id="add_count" min="1" max="500" value="1" title="每次启动从当前 CPA 再注册 N 个"/>
       </div>
       <div class="field"><label for="risk_pause">风控阈值</label>
         <input type="number" id="risk_pause" min="1" max="50" value="10"/>
@@ -1835,11 +1835,11 @@ function fillControl(d) {
 }
 function controlBody() {
   return {
-    workers: Number(document.getElementById("workers-input").value || 3),
-    batch_count: Number(document.getElementById("batch_count").value || 40),
-    add_count: Number((document.getElementById("add_count") || {}).value || 40),
+    workers: Number(document.getElementById("workers-input").value || 1),
+    batch_count: Number(document.getElementById("batch_count").value || 1),
+    add_count: Number((document.getElementById("add_count") || {}).value || 1),
     risk_pause: Number(document.getElementById("risk_pause").value || 10),
-    mode: document.getElementById("mode").value || "orch",
+    mode: document.getElementById("mode").value || "batch",
   };
 }
 async function saveCtrl() {
@@ -2254,7 +2254,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if body:
                     save_control(body)
-                mode = (body or {}).get("mode") or load_control().get("mode") or "orch"
+                mode = (body or {}).get("mode") or load_control().get("mode") or "batch"
                 if mode == "batch":
                     self._json(200, start_batch_only())
                 else:
