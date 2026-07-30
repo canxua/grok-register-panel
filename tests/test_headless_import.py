@@ -15,6 +15,17 @@ def test_server_runtime_imports_without_starting_gui():
     assert callable(panel.run_registration_cli)
     assert isinstance(panel.config, dict)
 
+    original = panel.config
+    try:
+        panel.config = {"max_slot_retry": 0}
+        assert panel.parse_max_slot_retry() == 0
+        panel.config = {"max_slot_retry": 99}
+        assert panel.parse_max_slot_retry() == 10
+        panel.config = {"max_slot_retry": "invalid"}
+        assert panel.parse_max_slot_retry() == 3
+    finally:
+        panel.config = original
+
 
 if __name__ == "__main__":
     test_server_runtime_imports_without_starting_gui()

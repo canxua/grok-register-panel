@@ -209,6 +209,7 @@ DEFAULT_CONFIG = {
     "log_level": "info",
     "register_count": 1,
     "register_workers": 1,
+    "max_slot_retry": 3,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     # CLIProxyAPI(CPA) 直出：注册拿到 SSO 后换 token，写入 CPA / Grok2API
     "cpa_auto_add": False,
@@ -497,6 +498,13 @@ def parse_account_interval() -> float:
         return float(int(raw))
     except ValueError:
         return 0.0
+
+
+def parse_max_slot_retry() -> int:
+    try:
+        return max(0, min(int(config.get("max_slot_retry", 3) or 0), 10))
+    except (TypeError, ValueError):
+        return 3
 
 
 def save_config():
@@ -3045,7 +3053,7 @@ class GrokRegisterGUI:
             wlog("[*] 浏览器已启动")
             i = 0
             retry_count_for_slot = 0
-            max_slot_retry = 3
+            max_slot_retry = parse_max_slot_retry()
             while i < count:
                 if self.should_stop():
                     break
@@ -3257,7 +3265,7 @@ def run_registration_cli(count):
     fail_count = 0
     fail_stats = empty_fail_stats()
     retry_count_for_slot = 0
-    max_slot_retry = 3
+    max_slot_retry = parse_max_slot_retry()
     accounts_output_file = ""  # 已改为按邮箱单独保存，不再使用批量文件
     workers = max(1, min(int(config.get("register_workers", 1) or 1), 24, int(count or 1)))
     pool = load_proxy_pool()

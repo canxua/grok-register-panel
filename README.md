@@ -106,6 +106,7 @@ cp config.example.json config.json
 | `proxies.txt` | 可选；多行代理，多 worker 轮换端口 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
 | `register_count` | 单次目标数量 |
+| `max_slot_retry` | 单个账号槽位的软故障重试次数；受控金丝雀可设为 `0` |
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
 | `cpa_auth_dir` | 本地 CPA 目录（`xai-*.json`） |
 | `grok2api_auth_dir` | Grok2API 风格 auth 目录 |
