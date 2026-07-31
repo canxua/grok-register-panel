@@ -119,7 +119,8 @@ CPA_GROK_HEADERS = {
 }
 CPA_PROBE_MODEL = "grok-4.5"
 CPA_PROBE_URL = f"{CPA_GROK_BASE_URL}/responses"
-CPA_PROBE_MAX_OUTPUT_TOKENS = 16
+CPA_PROBE_MAX_OUTPUT_TOKENS = 128
+CPA_PROBE_INPUT = "Reply with exactly pong."
 GROK_HOME_URL = "https://grok.com/"
 
 
@@ -1377,7 +1378,7 @@ def probe_cpa_record_verified(
         "headers": headers,
         "json": {
             "model": model,
-            "input": "ping",
+            "input": CPA_PROBE_INPUT,
             "max_output_tokens": CPA_PROBE_MAX_OUTPUT_TOKENS,
             "stream": False,
         },
@@ -1894,7 +1895,7 @@ def apply_config_defaults(args) -> None:
     ).strip()
     args.proxy = args.proxy or str(config.get("proxy") or "").strip()
     if not args.prefer:
-        mode = str(config.get("cpa_token_mode") or "device_protocol")
+        mode = str(config.get("cpa_token_mode") or "auth_code")
         args.prefer = "auth_code" if mode == "auth_code" else "device"
 
 

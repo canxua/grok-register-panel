@@ -197,6 +197,7 @@ UI_MUTED_FG = "#b8b8b8"
 UI_ENTRY_BG = "#333333"
 UI_BUTTON_BG = "#3a3a3a"
 UI_ACTIVE_BG = "#4a6078"
+DEFAULT_CPA_TOKEN_MODE = "auth_code"
 
 DEFAULT_CONFIG = {
     "email_provider": "cloudflare",
@@ -227,8 +228,8 @@ DEFAULT_CONFIG = {
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     # CLIProxyAPI(CPA) 直出：注册拿到 SSO 后换 token，写入 CPA / Grok2API
     "cpa_auto_add": False,
-    # Token 换取方式：device_protocol（协议 Device Flow，默认）/ device_browser（浏览器 Device Flow）/ auth_code
-    "cpa_token_mode": "device_protocol",
+    # Authorization Code 会携带 grok-build 上下文；失败时仍可回退 Device Flow。
+    "cpa_token_mode": DEFAULT_CPA_TOKEN_MODE,
     # CPA 本地 auth 目录（默认项目根目录下 cpa_auth/）
     "cpa_auth_dir": "cpa_auth",
     # 远程 CPA：通过 Management API POST /v0/management/auth-files 上传
@@ -1119,9 +1120,12 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
             log_callback(f"[CPA] {str(message).strip()}")
 
     try:
-        token_mode = str(config.get("cpa_token_mode", "device_protocol") or "device_protocol").lower()
+        token_mode = str(
+            config.get("cpa_token_mode", DEFAULT_CPA_TOKEN_MODE)
+            or DEFAULT_CPA_TOKEN_MODE
+        ).lower()
         if token_mode not in ("device_protocol", "device_browser", "auth_code"):
-            token_mode = "device_protocol"
+            token_mode = DEFAULT_CPA_TOKEN_MODE
         _mode_labels = {
             "device_protocol": "协议 Device Flow",
             "device_browser": "浏览器 Device Flow",
@@ -3043,22 +3047,25 @@ class GrokRegisterGUI:
             return widget
 
         # Token 换取方式选择
-        _cur_mode = str(config.get("cpa_token_mode", "device_protocol") or "device_protocol")
+        _cur_mode = str(
+            config.get("cpa_token_mode", DEFAULT_CPA_TOKEN_MODE)
+            or DEFAULT_CPA_TOKEN_MODE
+        )
         _mode_display = {
             "device_protocol": "协议 Device Flow",
             "device_browser": "浏览器 Device Flow",
             "auth_code": "Authorization Code",
-        }.get(_cur_mode, "协议 Device Flow")
+        }.get(_cur_mode, "Authorization Code")
         self.cpa_token_mode_var = tk.StringVar(value=_mode_display)
         c_label(1, 0, "Token 换取:")
         token_mode_menu = tk_option_menu(
             self.cpa_frame,
             self.cpa_token_mode_var,
-            ["协议 Device Flow", "浏览器 Device Flow", "Authorization Code"],
+            ["Authorization Code", "协议 Device Flow", "浏览器 Device Flow"],
             width=20,
         )
         c_field(token_mode_menu, 1, 1)
-        c_label(1, 2, "（默认协议换 token；浏览器模式需活动浏览器）")
+        c_label(1, 2, "（默认 Authorization Code；失败时回退协议 Device Flow）")
 
         self.cpa_auth_dir_var = tk.StringVar(value=str(config.get("cpa_auth_dir", "")))
         self.cpa_remote_url_var = tk.StringVar(value=str(config.get("cpa_remote_url", "")))
@@ -3256,7 +3263,7 @@ class GrokRegisterGUI:
             elif "auth" in _mode_text.lower() or "code" in _mode_text.lower():
                 config["cpa_token_mode"] = "auth_code"
             else:
-                config["cpa_token_mode"] = "device_protocol"
+                config["cpa_token_mode"] = DEFAULT_CPA_TOKEN_MODE
             config["cpa_auth_dir"] = self.cpa_auth_dir_var.get().strip()
             config["cpa_remote_url"] = self.cpa_remote_url_var.get().strip()
             config["cpa_management_key"] = self.cpa_management_key_var.get().strip()
@@ -3372,7 +3379,7 @@ class GrokRegisterGUI:
         elif "auth" in _mode_text.lower() or "code" in _mode_text.lower():
             config["cpa_token_mode"] = "auth_code"
         else:
-            config["cpa_token_mode"] = "device_protocol"
+            config["cpa_token_mode"] = DEFAULT_CPA_TOKEN_MODE
         config["cpa_auth_dir"] = self.cpa_auth_dir_var.get().strip()
         config["cpa_remote_url"] = self.cpa_remote_url_var.get().strip()
         config["cpa_management_key"] = self.cpa_management_key_var.get().strip()
@@ -3474,7 +3481,10 @@ class GrokRegisterGUI:
         if int(self.workers_var.get() or 1) > count and not config.get("debug_mode"):
             self.log(f"[*] 并发已自动调整为 {workers}（不超过注册数量）")
         _mode_map = {"device_protocol": "协议 Device Flow", "device_browser": "浏览器 Device Flow", "auth_code": "Authorization Code"}
-        _mode_label = _mode_map.get(str(config.get("cpa_token_mode", "device_protocol")), "协议 Device Flow")
+        _mode_label = _mode_map.get(
+            str(config.get("cpa_token_mode", DEFAULT_CPA_TOKEN_MODE)),
+            "Authorization Code",
+        )
         self.log(f"[*] SSO→auth: {'开' if config.get('cpa_auto_add') else '关（仅保存 SSO）'}" + (f"（{_mode_label}）" if config.get('cpa_auto_add') else ""))
         threading.Thread(
             target=self._run_registration_entry,
@@ -3795,7 +3805,10 @@ def run_registration_cli(count):
     if _cli_interval_raw and _cli_interval_raw != "0":
         cli_log(f"[*] 账号间注册间隔: {_cli_interval_raw}s")
     _cli_mode_map = {"device_protocol": "协议 Device Flow", "device_browser": "浏览器 Device Flow", "auth_code": "Authorization Code"}
-    _cli_mode_label = _cli_mode_map.get(str(config.get("cpa_token_mode", "device_protocol")), "协议 Device Flow")
+    _cli_mode_label = _cli_mode_map.get(
+        str(config.get("cpa_token_mode", DEFAULT_CPA_TOKEN_MODE)),
+        "Authorization Code",
+    )
     cli_log(f"[*] SSO→auth: {'开' if config.get('cpa_auto_add') else '关（仅保存 SSO）'}" + (f"（{_cli_mode_label}）" if config.get('cpa_auto_add') else ""))
     # 启动前清理上次崩溃 / 强杀残留的临时 profile 目录
     try:

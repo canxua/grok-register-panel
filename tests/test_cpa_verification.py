@@ -145,9 +145,14 @@ def test_provider_probe_uses_completion_sized_token_budget():
     assert (
         FakeRequests.post_kwargs["json"]["max_output_tokens"]
         == cpa.CPA_PROBE_MAX_OUTPUT_TOKENS
-        >= 16
+        == 128
     )
+    assert FakeRequests.post_kwargs["json"]["input"] == cpa.CPA_PROBE_INPUT
     assert FakeRequests.post_kwargs["json"]["stream"] is False
+
+
+def test_default_panel_token_mode_prefers_auth_code():
+    assert panel.DEFAULT_CONFIG["cpa_token_mode"] == "auth_code"
 
 
 def test_data_plane_requires_chat_completion_shape():
@@ -270,6 +275,7 @@ if __name__ == "__main__":
     test_management_upload_and_hotload_contract()
     test_provider_probe_rejects_generic_http_200()
     test_provider_probe_uses_completion_sized_token_budget()
+    test_default_panel_token_mode_prefers_auth_code()
     test_data_plane_requires_chat_completion_shape()
     test_panel_state_machine_reaches_verified_only_after_all_gates()
     print("OK CPA verification")
