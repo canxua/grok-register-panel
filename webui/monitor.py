@@ -22,6 +22,14 @@ from secure_files import atomic_write_json, ensure_private_dir
 
 try:
     from webui.blacklist_store import read_blacklist as read_blacklist_state
+    from webui.proxy_store import (
+        delete_proxy,
+        import_legacy_proxies,
+        import_proxies,
+        read_proxy_pool,
+        start_proxy_tests,
+        update_proxy,
+    )
     from webui.process_utils import (
         find_managed_processes,
         terminate_managed_processes,
@@ -37,6 +45,14 @@ try:
     )
 except ImportError:  # running as script from webui/
     from blacklist_store import read_blacklist as read_blacklist_state  # type: ignore
+    from proxy_store import (  # type: ignore
+        delete_proxy,
+        import_legacy_proxies,
+        import_proxies,
+        read_proxy_pool,
+        start_proxy_tests,
+        update_proxy,
+    )
     from process_utils import (  # type: ignore
         find_managed_processes,
         terminate_managed_processes,
@@ -982,8 +998,8 @@ HTML = r"""<!DOCTYPE html>
   .control-panel .msg:empty { display: none; }
   .field { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .field label { color: var(--muted); font-size: 12px; font-weight: 560; }
-  input, select, button { font: inherit; letter-spacing: 0; }
-  input, select {
+  input, select, textarea, button { font: inherit; letter-spacing: 0; }
+  input, select, textarea {
     width: 100%;
     min-height: 38px;
     border: 1px solid var(--border-strong);
@@ -993,9 +1009,10 @@ HTML = r"""<!DOCTYPE html>
     padding: 8px 10px;
     outline: none;
   }
-  input::placeholder { color: var(--placeholder); opacity: 1; }
-  input:hover, select:hover { border-color: var(--hover-border); }
-  input:focus, select:focus { border-color: var(--focus); box-shadow: 0 0 0 3px var(--focus-shadow); }
+  textarea { resize: vertical; }
+  input::placeholder, textarea::placeholder { color: var(--placeholder); opacity: 1; }
+  input:hover, select:hover, textarea:hover { border-color: var(--hover-border); }
+  input:focus, select:focus, textarea:focus { border-color: var(--focus); box-shadow: 0 0 0 3px var(--focus-shadow); }
   button {
     min-height: 38px;
     border: 1px solid var(--border-strong);
@@ -1156,6 +1173,100 @@ HTML = r"""<!DOCTYPE html>
   .recovery-layout { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .recovery-layout .chips { flex: 1 1 auto; }
   .recovery-actions { flex: 0 0 auto; }
+  body.proxy-view-open { overflow: hidden; }
+  body.proxy-view-open #dashboard-view > :not(#proxy-view) { display: none; }
+  .proxy-view {
+    position: fixed;
+    inset: 68px 0 0;
+    z-index: 8;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .proxy-view[hidden] { display: none; }
+  .proxy-view-inner {
+    width: min(calc(100% - 64px), 1280px);
+    margin: 0 auto;
+    padding: 28px 0 48px;
+  }
+  .proxy-view-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .proxy-view-subtitle { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+  .proxy-summary {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--border);
+    gap: 1px;
+  }
+  .proxy-summary-item { min-width: 0; padding: 12px 14px; background: var(--surface); }
+  .proxy-summary-label { color: var(--muted); font-size: 11px; }
+  .proxy-summary-value { margin-top: 4px; font-family: "Geist Mono", monospace; font-size: 22px; line-height: 1; font-weight: 720; }
+  .proxy-import {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(260px, .5fr);
+    gap: 16px;
+    align-items: stretch;
+    margin-top: 14px;
+    padding: 16px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  #proxy-input {
+    min-height: 126px;
+    font-family: "Geist Mono", monospace;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .proxy-import-actions { display: flex; flex-direction: column; justify-content: space-between; gap: 12px; }
+  .proxy-import-actions .button-group { justify-content: flex-start; }
+  .proxy-format { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+  .proxy-list-section { margin-top: 18px; }
+  .proxy-list-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+  .proxy-list-head h2 { margin: 0; font-size: 13px; }
+  .proxy-table-wrap { overflow: auto; border: 1px solid var(--border); background: var(--surface-raised); }
+  .proxy-table { min-width: 990px; table-layout: fixed; }
+  .proxy-table th:nth-child(1) { width: 82px; }
+  .proxy-table th:nth-child(2) { width: 260px; }
+  .proxy-table th:nth-child(3) { width: 150px; }
+  .proxy-table th:nth-child(4) { width: 86px; }
+  .proxy-table th:nth-child(5) { width: 180px; }
+  .proxy-table th:nth-child(6) { width: 96px; }
+  .proxy-table th:nth-child(7) { width: 190px; }
+  .proxy-endpoint { overflow-wrap: anywhere; }
+  .proxy-meta { margin-top: 3px; color: var(--muted); font-size: 10px; }
+  .proxy-state {
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .proxy-state.healthy { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); color: var(--ok); }
+  .proxy-state.unhealthy { border-color: color-mix(in srgb, var(--fail) 55%, var(--border)); color: var(--fail); }
+  .proxy-state.cooldown { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); color: var(--warn); }
+  .proxy-state.testing { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+  .proxy-actions { display: flex; align-items: center; gap: 6px; }
+  .proxy-actions button { min-height: 30px; padding: 5px 9px; font-size: 11px; }
+  .proxy-toggle { width: 16px; height: 16px; min-height: 0; accent-color: var(--accent); }
+  .proxy-empty { padding: 38px 18px !important; color: var(--muted); text-align: center; }
+  .proxy-job { color: var(--muted); font-size: 11px; }
   body.help-view-open { overflow: hidden; }
   body.help-view-open #dashboard-view > :not(#help-view) { display: none; }
   .help-view {
@@ -1330,6 +1441,15 @@ HTML = r"""<!DOCTYPE html>
     .recovery-layout { align-items: stretch; flex-direction: column; }
     .recovery-actions { justify-content: stretch; }
     .recovery-actions button { flex: 1 1 0; }
+    .proxy-view { inset-block-start: 60px; }
+    .proxy-view-inner { width: calc(100% - 24px); padding: 20px 0 34px; }
+    .proxy-view-heading { align-items: flex-start; flex-direction: column; margin-bottom: 16px; padding-bottom: 16px; }
+    .proxy-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .proxy-summary-item:last-child { grid-column: 1 / -1; }
+    .proxy-import { grid-template-columns: minmax(0, 1fr); }
+    .proxy-import-actions .button-group { justify-content: stretch; }
+    .proxy-import-actions button { flex: 1 1 auto; }
+    .proxy-list-head { align-items: flex-start; flex-direction: column; }
   }
   @media (max-width: 420px) {
     h1 { font-size: 15px; }
@@ -1342,9 +1462,13 @@ HTML = r"""<!DOCTYPE html>
     .control-actions button:last-child { flex-basis: 100%; }
     .metric .sub { font-size: 11px; }
     .button-group { justify-content: flex-start; }
+    #run-status { display: none; }
+    button.view-switch { min-width: 58px; padding-inline: 7px; }
   }
   @media (max-width: 340px) {
     .run-status { display: none; }
+    h1 { font-size: 0; }
+    h1::before { content: "GR"; font-size: 15px; }
   }
   html[data-theme="dark"] {
       color-scheme: dark;
@@ -1401,6 +1525,9 @@ HTML = r"""<!DOCTYPE html>
       <h1>GrokRegister</h1>
     </div>
     <div class="status-cluster">
+      <button type="button" class="view-switch" id="proxy-view-toggle" aria-label="打开代理池" title="代理池" aria-controls="proxy-view" aria-expanded="false" data-active="false" onclick="toggleProxyView()">
+        <span id="proxy-view-label" aria-hidden="true">代理池</span>
+      </button>
       <button type="button" class="view-switch" id="help-view-toggle" aria-label="打开问题和使用" title="问题和使用" aria-controls="help-view" aria-expanded="false" data-active="false" onclick="toggleAppView()">
         <span id="help-view-label" aria-hidden="true">问题和使用</span>
       </button>
@@ -1429,7 +1556,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="control-grid">
       <div class="field field-token">
         <label for="monitor-token">访问令牌</label>
-        <input id="monitor-token" type="password" autocomplete="off" placeholder="MONITOR_TOKEN" onchange="getToken(); refresh(); refreshRecovery()" onblur="getToken()"/>
+        <input id="monitor-token" type="password" autocomplete="off" placeholder="MONITOR_TOKEN" onchange="getToken(); refresh(); refreshRecovery(); refreshProxies()" onblur="getToken()"/>
       </div>
       <div class="field field-mode">
         <label for="mode">运行模式</label>
@@ -1557,6 +1684,57 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </section>
 
+  <section class="proxy-view" id="proxy-view" aria-labelledby="proxy-view-title" hidden>
+    <div class="proxy-view-inner">
+      <div class="proxy-view-heading">
+        <div>
+          <div class="page-title" id="proxy-view-title">外部代理池</div>
+          <p class="proxy-view-subtitle">凭据仅保存在本机，注册中途不会切换出口</p>
+        </div>
+        <span class="proxy-job mono" id="proxy-updated">等待读取</span>
+      </div>
+
+      <div class="proxy-summary" id="proxy-summary" aria-label="代理池状态">
+        <div class="proxy-summary-item"><div class="proxy-summary-label">总数</div><div class="proxy-summary-value">--</div></div>
+        <div class="proxy-summary-item"><div class="proxy-summary-label">可用</div><div class="proxy-summary-value">--</div></div>
+        <div class="proxy-summary-item"><div class="proxy-summary-label">异常</div><div class="proxy-summary-value">--</div></div>
+        <div class="proxy-summary-item"><div class="proxy-summary-label">冷却</div><div class="proxy-summary-value">--</div></div>
+        <div class="proxy-summary-item"><div class="proxy-summary-label">未检测</div><div class="proxy-summary-value">--</div></div>
+      </div>
+
+      <div class="proxy-import">
+        <div class="field">
+          <label for="proxy-input">代理地址（每行一条）</label>
+          <textarea id="proxy-input" spellcheck="false" autocomplete="off" placeholder="http://user:password@host:port&#10;host:port:user:password"></textarea>
+        </div>
+        <div class="proxy-import-actions">
+          <p class="proxy-format">支持 http、https、socks5、socks5h，以及 host:port:user:password。导入后先检测，只有健康且启用的代理会分配给新账号。</p>
+          <div class="button-group">
+            <button class="primary" id="proxy-import-button" onclick="importProxyInput()">导入代理</button>
+            <button id="proxy-legacy-button" onclick="importLegacyProxies()">导入 proxies.txt</button>
+          </div>
+        </div>
+      </div>
+      <div class="msg" id="proxy-msg" role="status" aria-live="polite"></div>
+
+      <div class="proxy-list-section">
+        <div class="proxy-list-head">
+          <div>
+            <h2>代理明细</h2>
+            <div class="proxy-job mono" id="proxy-test-status" role="status" aria-live="polite">未开始检测</div>
+          </div>
+          <button id="proxy-test-all" onclick="testProxies()">检测全部</button>
+        </div>
+        <div class="proxy-table-wrap">
+          <table class="proxy-table">
+            <thead><tr><th>状态</th><th>代理端点</th><th>出口 / ASN</th><th>延迟</th><th>最近状态</th><th>启用</th><th>操作</th></tr></thead>
+            <tbody id="proxy-body"><tr><td colspan="7" class="proxy-empty">正在读取代理池</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="metric-grid panel-gap" id="kpis" aria-label="核心指标"></section>
 
   <section class="card panel rate-panel">
@@ -1651,6 +1829,7 @@ HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 let last = null;
+let proxyData = null;
 const THEME_KEY = "GROK_REGISTER_THEME";
 const APP_VIEW_KEY = "GROK_REGISTER_APP_VIEW";
 const HELP_TAB_KEY = "GROK_REGISTER_HELP_TAB";
@@ -1669,33 +1848,49 @@ function setTheme(theme) {
   syncThemeButtons();
 }
 function setAppView(view, options = {}) {
-  if (view !== "dashboard" && view !== "help") return;
+  if (view !== "dashboard" && view !== "help" && view !== "proxies") return;
   const dashboard = document.getElementById("dashboard-view");
   const help = document.getElementById("help-view");
+  const proxies = document.getElementById("proxy-view");
   const toggle = document.getElementById("help-view-toggle");
   const label = document.getElementById("help-view-label");
-  if (!dashboard || !help || !toggle || !label) return;
+  const proxyToggle = document.getElementById("proxy-view-toggle");
+  const proxyLabel = document.getElementById("proxy-view-label");
+  if (!dashboard || !help || !proxies || !toggle || !label || !proxyToggle || !proxyLabel) return;
   const isHelp = view === "help";
-  const dashboardChildren = Array.from(dashboard.children).filter(element => element !== help);
+  const isProxies = view === "proxies";
+  const isOverlay = isHelp || isProxies;
+  const dashboardChildren = Array.from(dashboard.children).filter(element => element !== help && element !== proxies);
   dashboardChildren.forEach(element => {
-    element.inert = isHelp;
-    if (isHelp) element.setAttribute("aria-hidden", "true");
+    element.inert = isOverlay;
+    if (isOverlay) element.setAttribute("aria-hidden", "true");
     else element.removeAttribute("aria-hidden");
   });
   help.hidden = !isHelp;
   help.inert = !isHelp;
+  proxies.hidden = !isProxies;
+  proxies.inert = !isProxies;
   document.body.classList.toggle("help-view-open", isHelp);
+  document.body.classList.toggle("proxy-view-open", isProxies);
   toggle.dataset.active = String(isHelp);
   toggle.setAttribute("aria-expanded", String(isHelp));
   toggle.setAttribute("aria-label", isHelp ? "返回控制台" : "打开问题和使用");
   toggle.title = isHelp ? "返回控制台" : "问题和使用";
   label.textContent = isHelp ? "返回控制台" : "问题和使用";
+  proxyToggle.dataset.active = String(isProxies);
+  proxyToggle.setAttribute("aria-expanded", String(isProxies));
+  proxyToggle.setAttribute("aria-label", isProxies ? "返回控制台" : "打开代理池");
+  proxyToggle.title = isProxies ? "返回控制台" : "代理池";
+  proxyLabel.textContent = isProxies ? "返回控制台" : "代理池";
   if (options.persist !== false) {
     try { localStorage.setItem(APP_VIEW_KEY, view); } catch (e) {}
   }
+  if (isProxies) refreshProxies();
   if (options.focus) {
     requestAnimationFrame(() => {
-      const target = isHelp ? document.querySelector('[data-help-tab][aria-selected="true"]') : toggle;
+      const target = isHelp
+        ? document.querySelector('[data-help-tab][aria-selected="true"]')
+        : (isProxies ? document.getElementById("proxy-input") : (view === "dashboard" ? proxyToggle : toggle));
       if (target) target.focus();
     });
   }
@@ -1703,6 +1898,10 @@ function setAppView(view, options = {}) {
 function toggleAppView() {
   const isHelp = document.body.classList.contains("help-view-open");
   setAppView(isHelp ? "dashboard" : "help", { focus: true });
+}
+function toggleProxyView() {
+  const isProxies = document.body.classList.contains("proxy-view-open");
+  setAppView(isProxies ? "dashboard" : "proxies", { focus: true });
 }
 function setHelpTab(name) {
   if (name !== "guide" && name !== "faq") return;
@@ -1758,12 +1957,13 @@ function initHelp() {
     view = localStorage.getItem(APP_VIEW_KEY) || "dashboard";
     tab = localStorage.getItem(HELP_TAB_KEY) || "guide";
   } catch (e) {}
+  if (!["dashboard", "help", "proxies"].includes(view)) view = "dashboard";
   setHelpTab(tab);
   filterFaq("");
   setAppView(view, { persist: false, focus: false });
 }
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && document.body.classList.contains("help-view-open")) {
+  if (event.key === "Escape" && (document.body.classList.contains("help-view-open") || document.body.classList.contains("proxy-view-open"))) {
     setAppView("dashboard", { focus: true });
   }
 });
@@ -1807,6 +2007,149 @@ async function api(path, opts) {
   }
   if (j && j.ok === false) throw new Error(j.error || j.message || "request failed");
   return j;
+}
+function proxyStatusLabel(status) {
+  return ({ healthy: "健康", unhealthy: "异常", cooldown: "冷却", testing: "检测中", unknown: "未检测" })[status] || "未检测";
+}
+function proxyTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+function cooldownText(item) {
+  const seconds = Number(item.cooldown_remaining_seconds || 0);
+  if (seconds <= 0) return "";
+  const value = seconds >= 3600 ? Math.ceil(seconds / 3600) + " 小时" : Math.ceil(seconds / 60) + " 分钟";
+  return (item.cooldown_reason === "risk" ? "风控冷却 " : "网络冷却 ") + value;
+}
+function renderProxyPool(data) {
+  proxyData = data || {};
+  const summary = proxyData.summary || {};
+  const values = [
+    ["总数", summary.total ?? 0, ""],
+    ["可用", summary.usable ?? 0, "ok"],
+    ["异常", summary.unhealthy ?? 0, (summary.unhealthy || 0) > 0 ? "fail" : ""],
+    ["冷却", summary.cooldown ?? 0, (summary.cooldown || 0) > 0 ? "warn" : ""],
+    ["未检测", summary.unknown ?? 0, (summary.unknown || 0) > 0 ? "accent" : ""],
+  ];
+  document.getElementById("proxy-summary").innerHTML = values.map(([label, value, cls]) =>
+    `<div class="proxy-summary-item"><div class="proxy-summary-label">${esc(label)}</div><div class="proxy-summary-value ${cls}">${esc(value)}</div></div>`
+  ).join("");
+  document.getElementById("proxy-updated").textContent = proxyData.updated_at ? ("更新 " + proxyTime(proxyData.updated_at)) : "尚未写入";
+
+  const legacy = proxyData.legacy || {};
+  const legacyButton = document.getElementById("proxy-legacy-button");
+  legacyButton.disabled = !legacy.available;
+  legacyButton.textContent = legacy.available ? ("导入 proxies.txt (" + (legacy.count || 0) + ")") : "无 proxies.txt";
+
+  const job = proxyData.test_job || {};
+  const testButton = document.getElementById("proxy-test-all");
+  testButton.disabled = !!job.running || !(summary.enabled > 0);
+  document.getElementById("proxy-test-status").textContent = job.running
+    ? ("检测中 " + (job.completed || 0) + "/" + (job.total || 0) + "，健康 " + (job.healthy || 0) + "，失败 " + (job.failed || 0))
+    : (job.finished_at ? ("上次检测：健康 " + (job.healthy || 0) + "，失败 " + (job.failed || 0)) : "未开始检测");
+
+  const items = proxyData.items || [];
+  document.getElementById("proxy-body").innerHTML = items.length ? items.map(item => {
+    const status = item.status || "unknown";
+    const stateClass = ["healthy", "unhealthy", "cooldown", "testing"].includes(status) ? status : "";
+    const exit = item.exit_ip ? esc(item.exit_ip) : "--";
+    const asn = item.asn ? ("AS" + esc(item.asn)) : "--";
+    const org = item.asn_org ? `<div class="proxy-meta">${esc(item.asn_org)}</div>` : "";
+    const latency = item.latency_ms == null ? "--" : (esc(item.latency_ms) + " ms");
+    const cooldown = cooldownText(item);
+    const detail = cooldown || item.last_error || (item.last_checked_at ? ("检测 " + proxyTime(item.last_checked_at)) : "尚未检测");
+    const count = (item.failure_count || 0) > 0 ? `<div class="proxy-meta">失败 ${esc(item.failure_count)} / 风控 ${esc(item.risk_count || 0)}</div>` : "";
+    return `<tr>
+      <td><span class="proxy-state ${stateClass}">${esc(proxyStatusLabel(status))}</span></td>
+      <td><div class="mono proxy-endpoint">${esc(item.display_url || "")}</div><div class="proxy-meta">${item.has_auth ? "凭据已隐藏" : "无鉴权"} / ${esc(item.source || "panel")}</div></td>
+      <td><div class="mono">${exit}</div><div class="proxy-meta mono">${asn}</div>${org}</td>
+      <td class="mono">${latency}</td>
+      <td title="${esc(item.last_error || "")}">${esc(detail)}${count}</td>
+      <td><input class="proxy-toggle" type="checkbox" aria-label="启用 ${esc(item.display_url || "代理")}" ${item.enabled ? "checked" : ""} onchange="setProxyEnabled('${item.id}', this.checked)"/></td>
+      <td><div class="proxy-actions"><button ${status === "testing" ? "disabled" : ""} onclick="testProxies('${item.id}')">检测</button><button class="danger" onclick="deleteProxyItem('${item.id}')">删除</button></div></td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="7" class="proxy-empty">代理池为空，可在上方导入单条或批量代理</td></tr>';
+}
+async function refreshProxies(authHelp = false) {
+  try {
+    const data = await api("/api/proxies?_=" + Date.now(), { authHelp });
+    renderProxyPool(data);
+    if (!data.ok && data.error) setMsg("proxy-msg", data.error, "err");
+  } catch (e) {
+    const message = String(e.message || e);
+    document.getElementById("proxy-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+    setMsg("proxy-msg", message, "err");
+  }
+}
+function proxyImportMessage(result, prefix) {
+  const errors = result.errors || [];
+  const errorText = errors.length ? ("，跳过 " + errors.length + " 条：" + errors.slice(0, 2).map(item => "第 " + item.line + " 行 " + item.error).join("；")) : "";
+  return prefix + (result.imported_count || 0) + " 条，重复 " + (result.duplicate_count || 0) + " 条" + errorText;
+}
+async function startImportedProxyTests(result) {
+  const ids = result.imported_ids || [];
+  if (!ids.length) return false;
+  await api("/api/proxies/test", { method: "POST", body: JSON.stringify({ ids }) });
+  return true;
+}
+async function importProxyInput() {
+  const input = document.getElementById("proxy-input");
+  const button = document.getElementById("proxy-import-button");
+  const value = (input.value || "").trim();
+  if (!value) { setMsg("proxy-msg", "请输入至少一条代理", "err"); input.focus(); return; }
+  button.disabled = true;
+  setMsg("proxy-msg", "正在导入…", "");
+  try {
+    const result = await api("/api/proxies/import", { method: "POST", body: JSON.stringify({ proxies: value }) });
+    renderProxyPool(result);
+    input.value = "";
+    const testing = await startImportedProxyTests(result);
+    setMsg("proxy-msg", proxyImportMessage(result, "已导入 ") + (testing ? "，已开始检测" : ""), result.errors && result.errors.length ? "" : "ok");
+    setTimeout(() => refreshProxies(false), 300);
+  } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+async function importLegacyProxies() {
+  const button = document.getElementById("proxy-legacy-button");
+  button.disabled = true;
+  try {
+    const result = await api("/api/proxies/import", { method: "POST", body: JSON.stringify({ legacy: true }) });
+    renderProxyPool(result);
+    const testing = await startImportedProxyTests(result);
+    setMsg("proxy-msg", proxyImportMessage(result, "已从 proxies.txt 导入 ") + (testing ? "，已开始检测" : ""), "ok");
+    setTimeout(() => refreshProxies(false), 300);
+  } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+async function testProxies(id) {
+  const ids = id ? [id] : [];
+  setMsg("proxy-msg", id ? "正在检测该代理…" : "正在启动批量检测…", "");
+  try {
+    await api("/api/proxies/test", { method: "POST", body: JSON.stringify({ ids }) });
+    setMsg("proxy-msg", "检测任务已启动", "ok");
+    await refreshProxies(false);
+  } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+}
+async function setProxyEnabled(id, enabled) {
+  try {
+    const result = await api("/api/proxies/" + id, { method: "PATCH", body: JSON.stringify({ enabled }) });
+    renderProxyPool(result);
+    setMsg("proxy-msg", enabled ? "代理已启用" : "代理已停用", "ok");
+  } catch (e) {
+    setMsg("proxy-msg", String(e.message || e), "err");
+    await refreshProxies(false);
+  }
+}
+async function deleteProxyItem(id) {
+  const item = (proxyData && proxyData.items || []).find(value => value.id === id);
+  if (!confirm("删除代理 " + (item ? item.display_url : "") + "？")) return;
+  try {
+    const result = await api("/api/proxies/" + id, { method: "DELETE" });
+    renderProxyPool(result);
+    setMsg("proxy-msg", "代理已删除", "ok");
+  } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
 }
 async function refresh() {
   try {
@@ -2087,6 +2430,9 @@ setInterval(refresh, 2000);
 refreshStats(false);
 refreshRecovery();
 setInterval(refreshRecovery, 5000);
+setInterval(() => {
+  if (document.body.classList.contains("proxy-view-open")) refreshProxies(false);
+}, 3000);
 </script>
 </body>
 </html>
@@ -2131,7 +2477,7 @@ class Handler(BaseHTTPRequestHandler):
         allow = str(os.environ.get("MONITOR_CORS_ORIGIN", "") or "").strip()
         if allow and allow != "*":
             self.send_header("Access-Control-Allow-Origin", allow)
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
         self.wfile.write(body)
@@ -2197,7 +2543,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             self._json(200, {"ok": True})
             return
-        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery"):
+        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies"):
             if not self._require_read():
                 return
         if u.path == "/api/status":
@@ -2228,6 +2574,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, recovery_status())
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+            return
+        if u.path == "/api/proxies":
+            try:
+                self._json(200, read_proxy_pool())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
         self._send(404, b"not found", "text/plain")
 
@@ -2282,6 +2634,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
             return
+        if u.path == "/api/proxies/import":
+            try:
+                if body.get("legacy") is True:
+                    result = import_legacy_proxies()
+                else:
+                    result = import_proxies(body.get("proxies"), source="panel")
+                self._json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/proxies/test":
+            try:
+                result = start_proxy_tests(body.get("ids"))
+                if result.get("ok"):
+                    code = 202
+                elif result.get("running"):
+                    code = 409
+                else:
+                    code = 400
+                self._json(code, result)
+            except Exception as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            return
         if u.path == "/api/blacklist/refresh":
             try:
                 bl = read_blacklist()
@@ -2314,6 +2689,44 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
         self._send(404, b"not found", "text/plain")
+
+    def do_PATCH(self):
+        u = urlparse(self.path)
+        match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
+        if match is None:
+            self._send(404, b"not found", "text/plain")
+            return
+        if not self._require_write():
+            return
+        try:
+            body = self._read_body()
+        except OverflowError as exc:
+            self._json(413, {"ok": False, "error": str(exc)})
+            return
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        try:
+            result = update_proxy(match.group(1), enabled=body.get("enabled"))
+            self._json(200 if result.get("ok") else 404, result)
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
+        except Exception as exc:
+            self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
+        if match is None:
+            self._send(404, b"not found", "text/plain")
+            return
+        if not self._require_write():
+            return
+        try:
+            result = delete_proxy(match.group(1))
+            self._json(200 if result.get("ok") else 404, result)
+        except Exception as exc:
+            self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
 
 
 def main():

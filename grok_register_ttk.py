@@ -65,6 +65,12 @@ from secure_files import (
     ensure_private_dir,
     exclusive_file_lock,
 )
+from webui.proxy_store import (
+    mark_proxy_used as _mark_managed_proxy_used,
+    record_proxy_result as _record_managed_proxy_result,
+    worker_proxy_snapshot as _managed_worker_proxy_snapshot,
+)
+from webui.security_utils import redact_log_line as redact_sensitive_log_line
 from browser_session import (
 
     browser,
@@ -363,6 +369,15 @@ def record_register_result(
         proxy = get_bound_proxy() or ""
     except Exception:
         pass
+    try:
+        if status == "ok":
+            _record_managed_proxy_result(proxy, "success")
+        elif status == "risk" or kind == FAIL_RISK:
+            _record_managed_proxy_result(proxy, "risk", detail)
+        elif kind == FAIL_BROWSER:
+            _record_managed_proxy_result(proxy, "network", detail)
+    except Exception:
+        pass
     # 从 proxy URL 抽端口
     port = ""
     try:
@@ -378,7 +393,7 @@ def record_register_result(
         "status": status,
         "email": mask_email(email or ""),
         "kind": kind or "",
-        "detail": (detail or "")[:300],
+        "detail": redact_sensitive_log_line(detail or "")[:300],
         "worker": worker or "",
         "exit_ip": exit_ip,
         "proxy": redact_proxy(proxy),
@@ -563,14 +578,28 @@ DUCKMAIL_API_BASE_DEFAULT = duckmail_provider.API_BASE_DEFAULT
 _proxy_tls = threading.local()
 _proxy_pool: list = []
 _proxy_pool_lock = threading.Lock()
+_proxy_pool_source = "none"
 
 
 def load_proxy_pool(path: str = "") -> list:
-    """加载配置的代理池；空则回落项目 proxies.txt 或 config.proxy。"""
-    global _proxy_pool
+    """热加载健康面板代理；未配置时兼容 proxy_file / proxies.txt / config.proxy。"""
+    global _proxy_pool, _proxy_pool_source
+    try:
+        managed_snapshot = _managed_worker_proxy_snapshot()
+    except Exception:
+        managed_snapshot = {"configured": False, "urls": []}
+    managed = list(managed_snapshot.get("urls") or [])
+    if managed_snapshot.get("configured"):
+        with _proxy_pool_lock:
+            _proxy_pool = managed
+            _proxy_pool_source = "managed" if managed else "managed-empty"
+            return list(_proxy_pool)
+
     pool = load_proxy_urls(config, APP_DIR, explicit_path=path)
-    _proxy_pool = pool
-    return pool
+    with _proxy_pool_lock:
+        _proxy_pool = list(pool)
+        _proxy_pool_source = "legacy" if pool else "none"
+        return list(_proxy_pool)
 
 
 def set_thread_proxy(proxy: str):
@@ -582,19 +611,19 @@ def get_thread_proxy() -> str:
 
 
 def pick_proxy_for_worker(worker_id: int, rotate_idx: int = 0) -> str:
-    """worker 绑定 pool[wid], pool[wid+workers], ... 轮换。"""
-    pool = _proxy_pool or load_proxy_pool()
+    """账号边界热加载，全池轮换；当前浏览器会话内不再换代理。"""
+    pool = load_proxy_pool()
     if not pool:
+        if _proxy_pool_source == "managed-empty":
+            raise RuntimeError("面板代理池没有健康且启用的代理，请先检测或等待冷却结束")
         return str(config.get("proxy", "") or "").strip()
-    # 按 worker 分片，再在分片内用 rotate_idx 轮换
-    # 简化：全局 round-robin 用 wid + rotate_idx * max_workers 映射
-    workers = max(1, int(config.get("register_workers", 1) or 1))
-    # 该 worker 可用的下标: wid, wid+workers, wid+2*workers, ...
-    indices = list(range(worker_id % len(pool), len(pool), workers))
-    if not indices:
-        indices = [worker_id % len(pool)]
-    idx = indices[rotate_idx % len(indices)]
-    return pool[idx]
+    idx = (max(0, int(worker_id)) + max(0, int(rotate_idx))) % len(pool)
+    selected = pool[idx]
+    try:
+        _mark_managed_proxy_used(selected)
+    except Exception:
+        pass
+    return selected
 
 
 def get_proxies():
@@ -602,6 +631,16 @@ def get_proxies():
     if proxy:
         return {"http": proxy, "https": proxy}
     return {}
+
+
+def record_proxy_boot_failure(proxy: str, exc) -> None:
+    """Apply runtime cooldown to managed proxies without touching legacy entries."""
+    message = str(exc or "")
+    outcome = "risk" if ("黑名单" in message or "policy=deny" in message) else "network"
+    try:
+        _record_managed_proxy_result(proxy, outcome, message)
+    except Exception:
+        pass
 
 
 _MAIL_DIRECT_MARKERS = (
@@ -913,7 +952,10 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             "device_browser": "浏览器 Device Flow",
             "auth_code": "Authorization Code",
         }
-        _cpa_log(f"SSO → {_mode_labels.get(token_mode, token_mode)} 换 token (proxy={proxy}) ...")
+        _cpa_log(
+            f"SSO → {_mode_labels.get(token_mode, token_mode)} 换 token "
+            f"(proxy={redact_proxy(proxy)}) ..."
+        )
 
         def _browser_approve(user_code, open_url):
             return authorize_device_in_browser(
@@ -982,7 +1024,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             return False
         return True
     except Exception as exc:
-        _cpa_log(f"直出失败: {exc}")
+        _cpa_log(f"直出失败: {redact_sensitive_log_line(str(exc))}")
         _append_sso_pending(email, sso, log_callback=log_callback)
         return False
 
@@ -1919,8 +1961,10 @@ return (async () => {
         return False, f"浏览器内 update_nsfw HTTP {nsfw_status}: {nsfw_body[:160]}"
     except Exception as exc:
         if log_callback:
-            log_callback(f"[Debug] 浏览器内 NSFW 异常: {exc}")
-        return False, f"浏览器内 NSFW 异常: {exc}"
+            log_callback(
+                f"[Debug] 浏览器内 NSFW 异常: {redact_sensitive_log_line(str(exc))}"
+            )
+        return False, f"浏览器内 NSFW 异常: {redact_sensitive_log_line(str(exc))}"
 
 
 def enable_nsfw_for_token(token, cf_clearance="", user_agent="", log_callback=None):
@@ -2782,7 +2826,12 @@ class GrokRegisterGUI:
                 all_ok = all(ok for _, ok, _ in results)
                 self.ui_queue.put((self._on_check_done, (text, all_ok)))
             except Exception as exc:
-                self.ui_queue.put((self._on_check_done, (f"检查异常: {exc}", False)))
+                self.ui_queue.put(
+                    (
+                        self._on_check_done,
+                        (f"检查异常: {redact_sensitive_log_line(str(exc))}", False),
+                    )
+                )
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -2957,7 +3006,10 @@ class GrokRegisterGUI:
         try:
             checks = _conn.run_connectivity_checks(config, http_get, http_post)
             for name, ok, detail in checks:
-                self.log(f"[检查] [{'OK' if ok else 'FAIL'}] {name}: {detail}")
+                self.log(
+                    f"[检查] [{'OK' if ok else 'FAIL'}] {name}: "
+                    f"{redact_sensitive_log_line(detail)}"
+                )
             if _conn.has_blocking_xai_failure(checks):
                 self.log("[!] xAI 注册页被 Cloudflare 拦截，已停止建号；请更换当前 proxy 后重试")
                 self._set_running_ui(False)
@@ -2965,7 +3017,7 @@ class GrokRegisterGUI:
             if not all(ok for _, ok, _ in checks):
                 self.log("[!] 连通性检查存在失败项，仍继续注册（可先点「连通性检查」排查）")
         except Exception as exc:
-            self.log(f"[!] 连通性检查异常: {exc}")
+            self.log(f"[!] 连通性检查异常: {redact_sensitive_log_line(str(exc))}")
         _interval_raw = str(config.get("account_interval", "0") or "0").strip()
         _interval_info = f" | 账号间隔: {_interval_raw}s" if _interval_raw and _interval_raw != "0" else ""
         self.log(
@@ -3043,7 +3095,10 @@ class GrokRegisterGUI:
                 start_browser(log_callback=wlog)
             except Exception as boot_exc:
                 streak = get_start_fail_streak()
-                wlog(f"[-] 浏览器启动失败 (连续失败 {streak}): {boot_exc}")
+                wlog(
+                    f"[-] 浏览器启动失败 (连续失败 {streak}): "
+                    f"{redact_sensitive_log_line(str(boot_exc))}"
+                )
                 if workers > 1 and streak >= 3:
                     wlog("[!] 连续启动失败较多，建议降低并发后重试")
                 for _ in range(max(int(count or 0), 0)):
@@ -3171,18 +3226,23 @@ class GrokRegisterGUI:
                     kind = self._record_failure(exc)
                     retry_count_for_slot = 0
                     i += 1
-                    wlog(f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                    wlog(
+                        f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: "
+                        f"{redact_sensitive_log_line(str(exc))}"
+                    )
                     wlog("[!] 请更换邮箱提供商或域名（如 Cloudflare 自建域 / MailNest），公共临时域常被拉黑")
                 except AccountRetryNeeded as exc:
                     retry_count_for_slot += 1
                     if retry_count_for_slot <= max_slot_retry:
                         wlog(
-                            f"[!] 当前账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: {exc}"
+                            f"[!] 当前账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: "
+                            f"{redact_sensitive_log_line(str(exc))}"
                         )
                     else:
                         kind = self._record_failure(exc)
                         wlog(
-                            f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: {exc}"
+                            f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: "
+                            f"{redact_sensitive_log_line(str(exc))}"
                         )
                         retry_count_for_slot = 0
                         i += 1
@@ -3190,7 +3250,10 @@ class GrokRegisterGUI:
                     kind = self._record_failure(exc)
                     retry_count_for_slot = 0
                     i += 1
-                    wlog(f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                    wlog(
+                        f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: "
+                        f"{redact_sensitive_log_line(str(exc))}"
+                    )
                 finally:
                     self.update_stats()
                 if self.should_stop():
@@ -3214,7 +3277,7 @@ class GrokRegisterGUI:
         except RegistrationCancelled:
             wlog("[!] 注册被用户停止")
         except Exception as exc:
-            wlog(f"[!] 任务异常: {exc}")
+            wlog(f"[!] 任务异常: {redact_sensitive_log_line(str(exc))}")
         finally:
             try:
                 maybe_stop_browser(user_stopped=bool(self.stop_requested), log_callback=wlog)
@@ -3269,7 +3332,10 @@ def run_registration_cli(count):
     accounts_output_file = ""  # 已改为按邮箱单独保存，不再使用批量文件
     workers = max(1, min(int(config.get("register_workers", 1) or 1), 24, int(count or 1)))
     pool = load_proxy_pool()
-    cli_log(f"[*] 终端模式启动，目标数量: {count} | 并发: {workers} | 代理池: {len(pool)}")
+    cli_log(
+        f"[*] 终端模式启动，目标数量: {count} | 并发: {workers} | "
+        f"代理池: {len(pool)} ({_proxy_pool_source})"
+    )
     _cli_interval_raw = str(config.get("account_interval", "0") or "0").strip()
     if _cli_interval_raw and _cli_interval_raw != "0":
         cli_log(f"[*] 账号间注册间隔: {_cli_interval_raw}s")
@@ -3282,9 +3348,15 @@ def run_registration_cli(count):
     except Exception:
         pass
     try:
-        startup_checks = _conn.run_connectivity_checks(config, http_get, http_post)
+        startup_config = dict(config)
+        if pool:
+            startup_config["proxy"] = pool[0]
+        startup_checks = _conn.run_connectivity_checks(startup_config, http_get, http_post)
         for name, ok, detail in startup_checks:
-            cli_log(f"[检查] [{'OK' if ok else 'FAIL'}] {name}: {detail}")
+            cli_log(
+                f"[检查] [{'OK' if ok else 'FAIL'}] {name}: "
+                f"{redact_sensitive_log_line(detail)}"
+            )
         if _conn.has_blocking_xai_failure(startup_checks):
             cli_log("[!] xAI 注册页被 Cloudflare 拦截，已停止建号；请更换当前 proxy 后重试")
             try:
@@ -3293,7 +3365,10 @@ def run_registration_cli(count):
                 pass
             return
     except Exception as exc:
-        cli_log(f"[!] 启动连通性检查异常，继续注册: {exc}")
+        cli_log(
+            f"[!] 启动连通性检查异常，继续注册: "
+            f"{redact_sensitive_log_line(str(exc))}"
+        )
 
     def _cli_record_failure(exc):
         nonlocal fail_count
@@ -3317,12 +3392,22 @@ def run_registration_cli(count):
             local_fail_stats = empty_fail_stats()
             rotate_idx = 0
             try:
-                px = pick_proxy_for_worker(wid, rotate_idx)
+                try:
+                    px = pick_proxy_for_worker(wid, rotate_idx)
+                except Exception as proxy_exc:
+                    local_fail = n
+                    local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + n
+                    cli_log(
+                        f"[W{wid+1}] [-] 没有可用代理，停止该 worker: "
+                        f"{redact_sensitive_log_line(str(proxy_exc))}"
+                    )
+                    return
                 set_thread_proxy(px)
-                cli_log(f"[W{wid+1}] [*] 绑定代理: {px}")
+                cli_log(f"[W{wid+1}] [*] 绑定代理: {redact_proxy(px)}")
                 try:
                     start_browser(log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"))
                 except Exception as boot_exc:
+                    record_proxy_boot_failure(px, boot_exc)
                     # 黑名单/死代理：多换几条 sticky 再放弃
                     booted = False
                     last_boot = boot_exc
@@ -3339,18 +3424,25 @@ def run_registration_cli(count):
                         try:
                             px = pick_proxy_for_worker(wid, rotate_idx)
                             set_thread_proxy(px)
-                            cli_log(f"[W{wid+1}] [*] 跳过坏出口，换代理 #{rotate_idx}: {px} ({msgb[:80]})")
+                            cli_log(
+                                f"[W{wid+1}] [*] 跳过坏出口，换代理 #{rotate_idx}: "
+                                f"{redact_proxy(px)} ({redact_sensitive_log_line(msgb[:80])})"
+                            )
                             start_browser(log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"))
                             booted = True
                             break
                         except Exception as boot2:
                             last_boot = boot2
+                            record_proxy_boot_failure(px, boot2)
                             continue
                     if not booted:
                         local_fail = n
                         local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + n
                         mark_slot_completed(n)
-                        cli_log(f"[W{wid+1}] [-] 浏览器启动失败，{n} 个任务均记为失败: {last_boot}")
+                        cli_log(
+                            f"[W{wid+1}] [-] 浏览器启动失败，{n} 个任务均记为失败: "
+                            f"{redact_sensitive_log_line(str(last_boot))}"
+                        )
                         record_register_result(
                             "fail",
                             kind=FAIL_BROWSER,
@@ -3361,7 +3453,8 @@ def run_registration_cli(count):
                         return
                 i = 0
                 retry = 0
-                while i < n and not controller.should_stop():
+                worker_stop = False
+                while i < n and not controller.should_stop() and not worker_stop:
                     try:
                         open_signup_page(
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
@@ -3442,7 +3535,10 @@ def run_registration_cli(count):
                         local_fail += 1
                         i += 1
                         retry = 0
-                        cli_log(f"[W{wid+1}] [-] 域名拒绝: {exc}")
+                        cli_log(
+                            f"[W{wid+1}] [-] 域名拒绝: "
+                            f"{redact_sensitive_log_line(str(exc))}"
+                        )
                         record_register_result(
                             "fail",
                             email if email else "",
@@ -3460,7 +3556,10 @@ def run_registration_cli(count):
                             local_fail += 1
                             i += 1
                             retry = 0
-                            cli_log(f"[W{wid+1}] [-] 卡住跳过: {exc}")
+                            cli_log(
+                                f"[W{wid+1}] [-] 卡住跳过: "
+                                f"{redact_sensitive_log_line(str(exc))}"
+                            )
                             mark_slot_completed()
                     except Exception as exc:
                         msg = str(exc)
@@ -3477,6 +3576,10 @@ def run_registration_cli(count):
                             or "出口IP命中黑名单" in msg
                             or "命中黑名单" in msg
                         )
+                        if proxy_dead:
+                            record_proxy_boot_failure(
+                                get_bound_proxy() or get_thread_proxy(), exc
+                            )
                         turnstile_stuck = (
                             "资料页 Turnstile" in msg
                             or "Turnstile 超时" in msg
@@ -3494,7 +3597,8 @@ def run_registration_cli(count):
                                 else ("资料页未就绪" if profile_soft else "空页/表单未就绪")
                             )
                             cli_log(
-                                f"[W{wid+1}] [!] {why}，同槽位换口重试 {retry}/{max_slot_retry}: {exc}"
+                                f"[W{wid+1}] [!] {why}，同槽位换口重试 {retry}/{max_slot_retry}: "
+                                f"{redact_sensitive_log_line(str(exc))}"
                             )
                             rotate_idx += 1
                             continue
@@ -3503,7 +3607,10 @@ def run_registration_cli(count):
                         local_fail += 1
                         i += 1
                         retry = 0
-                        cli_log(f"[W{wid+1}] [-] 失败 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                        cli_log(
+                            f"[W{wid+1}] [-] 失败 [{FAIL_LABELS.get(kind, kind)}]: "
+                            f"{redact_sensitive_log_line(str(exc))}"
+                        )
                         _bf = None
                         _rk = None
                         if kind == FAIL_RISK:
@@ -3551,32 +3658,64 @@ def run_registration_cli(count):
                             try:
                                 px = pick_proxy_for_worker(wid, rotate_idx)
                                 set_thread_proxy(px)
-                                cli_log(f"[W{wid+1}] [*] 下号代理: {px}")
+                                cli_log(f"[W{wid+1}] [*] 下号代理: {redact_proxy(px)}")
                                 start_browser(log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"))
                                 time.sleep(0.5)
                             except Exception as boot_exc:
                                 last_boot = boot_exc
-                                for _try in range(1, 10):
-                                    msgb = str(last_boot)
-                                    if not (
-                                        "出口IP命中黑名单" in msgb
-                                        or "无法解析出口 IP" in msgb
-                                        or "代理不可用或过慢" in msgb
-                                    ):
-                                        break
-                                    rotate_idx += 1
-                                    try:
-                                        px = pick_proxy_for_worker(wid, rotate_idx)
-                                        set_thread_proxy(px)
-                                        cli_log(f"[W{wid+1}] [*] 下号跳过黑名单，换 #{rotate_idx}: {px}")
-                                        start_browser(log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"))
-                                        time.sleep(0.5)
-                                        last_boot = None
-                                        break
-                                    except Exception as boot2:
-                                        last_boot = boot2
-                                if last_boot is not None:
-                                    cli_log(f"[W{wid+1}] [-] 切换代理后启动失败: {last_boot}")
+                                record_proxy_boot_failure(px, boot_exc)
+                                if "面板代理池没有健康且启用的代理" in str(boot_exc):
+                                    remaining = max(n - i, 0)
+                                    local_fail += remaining
+                                    local_fail_stats[FAIL_BROWSER] = (
+                                        local_fail_stats.get(FAIL_BROWSER, 0) + remaining
+                                    )
+                                    cli_log(
+                                        f"[W{wid+1}] [-] 健康代理已耗尽，停止该 worker: "
+                                        f"{redact_sensitive_log_line(str(boot_exc))}"
+                                    )
+                                    worker_stop = True
+                                else:
+                                    for _try in range(1, 10):
+                                        msgb = str(last_boot)
+                                        if not (
+                                            "出口IP命中黑名单" in msgb
+                                            or "无法解析出口 IP" in msgb
+                                            or "代理不可用或过慢" in msgb
+                                        ):
+                                            break
+                                        rotate_idx += 1
+                                        try:
+                                            px = pick_proxy_for_worker(wid, rotate_idx)
+                                            set_thread_proxy(px)
+                                            cli_log(
+                                                f"[W{wid+1}] [*] 下号跳过黑名单，换 #{rotate_idx}: "
+                                                f"{redact_proxy(px)}"
+                                            )
+                                            start_browser(log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"))
+                                            time.sleep(0.5)
+                                            last_boot = None
+                                            break
+                                        except Exception as boot2:
+                                            last_boot = boot2
+                                            record_proxy_boot_failure(px, boot2)
+                                            if "面板代理池没有健康且启用的代理" in str(boot2):
+                                                remaining = max(n - i, 0)
+                                                local_fail += remaining
+                                                local_fail_stats[FAIL_BROWSER] = (
+                                                    local_fail_stats.get(FAIL_BROWSER, 0) + remaining
+                                                )
+                                                cli_log(
+                                                    f"[W{wid+1}] [-] 健康代理已耗尽，停止该 worker: "
+                                                    f"{redact_sensitive_log_line(str(boot2))}"
+                                                )
+                                                worker_stop = True
+                                                break
+                                    if last_boot is not None and not worker_stop:
+                                        cli_log(
+                                            f"[W{wid+1}] [-] 切换代理后启动失败: "
+                                            f"{redact_sensitive_log_line(str(last_boot))}"
+                                        )
             finally:
                 try:
                     maybe_stop_browser(
@@ -3613,13 +3752,37 @@ def run_registration_cli(count):
         return
 
     try:
-        try:
-            start_browser(log_callback=cli_log)
-        except Exception as boot_exc:
+        single_rotate_idx = 0
+        last_boot = None
+        boot_attempts = max(1, min(12, len(pool) or 1))
+        for _boot_try in range(boot_attempts):
+            px = ""
+            try:
+                px = pick_proxy_for_worker(0, single_rotate_idx)
+                set_thread_proxy(px)
+                cli_log(f"[*] 绑定代理: {redact_proxy(px) or '直连'}")
+                start_browser(log_callback=cli_log)
+                last_boot = None
+                break
+            except Exception as boot_exc:
+                last_boot = boot_exc
+                record_proxy_boot_failure(px, boot_exc)
+                single_rotate_idx += 1
+        if last_boot is not None:
             fail_count += count
             fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + count
             mark_slot_completed(count)
-            cli_log(f"[-] 浏览器启动失败，{count} 个任务均记为失败: {boot_exc}")
+            cli_log(
+                f"[-] 浏览器启动失败，{count} 个任务均记为失败: "
+                f"{redact_sensitive_log_line(str(last_boot))}"
+            )
+            record_register_result(
+                "fail",
+                kind=FAIL_BROWSER,
+                detail=str(last_boot),
+                worker="W1",
+                log_callback=cli_log,
+            )
             return
         cli_log("[*] 浏览器已启动")
         i = 0
@@ -3709,6 +3872,17 @@ def run_registration_cli(count):
                     cli_log(f"[+] 注册成功: {email}")
                 else:
                     cli_log(f"[+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
+                record_register_result(
+                    "ok",
+                    email,
+                    kind="success",
+                    detail="cpa_ok" if cpa_ok else "cpa_fail",
+                    worker="W1",
+                    bot_flag=0,
+                    log_callback=cli_log,
+                )
+                if success_count % 2 == 0:
+                    single_rotate_idx += 1
                 cli_log(f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count}")
                 mark_slot_completed()
                 if success_count > 0 and success_count % MEMORY_CLEANUP_INTERVAL == 0 and i < count:
@@ -3723,26 +3897,78 @@ def run_registration_cli(count):
                 kind = _cli_record_failure(exc)
                 retry_count_for_slot = 0
                 i += 1
-                cli_log(f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                cli_log(
+                    f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: "
+                    f"{redact_sensitive_log_line(str(exc))}"
+                )
+                record_register_result(
+                    "fail",
+                    email or "",
+                    kind=kind,
+                    detail=str(exc),
+                    worker="W1",
+                    log_callback=cli_log,
+                )
                 cli_log("[!] 请更换邮箱提供商或域名（如 Cloudflare 自建域 / MailNest），公共临时域常被拉黑")
                 mark_slot_completed()
             except AccountRetryNeeded as exc:
                 retry_count_for_slot += 1
                 if retry_count_for_slot <= max_slot_retry:
                     cli_log(
-                        f"[!] 当前账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: {exc}"
+                        f"[!] 当前账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: "
+                        f"{redact_sensitive_log_line(str(exc))}"
                     )
                 else:
                     kind = _cli_record_failure(exc)
                     retry_count_for_slot = 0
                     i += 1
-                    cli_log(f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                    cli_log(
+                        f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: "
+                        f"{redact_sensitive_log_line(str(exc))}"
+                    )
+                    record_register_result(
+                        "fail",
+                        email or "",
+                        kind=kind,
+                        detail=str(exc),
+                        worker="W1",
+                        log_callback=cli_log,
+                    )
                     mark_slot_completed()
             except Exception as exc:
                 kind = _cli_record_failure(exc)
                 retry_count_for_slot = 0
                 i += 1
-                cli_log(f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: {exc}")
+                message = str(exc)
+                proxy_dead = any(
+                    marker in message
+                    for marker in (
+                        "无法解析出口 IP",
+                        "Failed to get IP address",
+                        "代理不可用或过慢",
+                        "出口IP命中黑名单",
+                        "命中黑名单",
+                    )
+                )
+                if proxy_dead:
+                    record_proxy_boot_failure(
+                        get_bound_proxy() or get_thread_proxy(), exc
+                    )
+                if kind == FAIL_RISK or proxy_dead or kind in (FAIL_TURNSTILE, FAIL_PROFILE):
+                    single_rotate_idx += 1
+                cli_log(
+                    f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: "
+                    f"{redact_sensitive_log_line(message)}"
+                )
+                if kind != FAIL_RISK:
+                    record_register_result(
+                        "fail",
+                        email or "",
+                        kind=kind,
+                        detail=message,
+                        worker="W1",
+                        log_callback=cli_log,
+                    )
                 mark_slot_completed()
             if controller.should_stop():
                 break
@@ -3768,13 +3994,26 @@ def run_registration_cli(count):
                 if controller.should_stop():
                     break
                 cli_log(f"[Debug] 轮次关闭浏览器失败: {close_exc}")
+            try:
+                px = pick_proxy_for_worker(0, single_rotate_idx)
+                set_thread_proxy(px)
+                cli_log(f"[*] 下号代理: {redact_proxy(px) or '直连'}")
+            except Exception as proxy_exc:
+                cli_log(
+                    f"[-] 下号没有可用代理: "
+                    f"{redact_sensitive_log_line(str(proxy_exc))}"
+                )
+                remaining = max(count - i, 0)
+                fail_count += remaining
+                fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + remaining
+                break
     except KeyboardInterrupt:
         controller.stop()
         cli_log("[!] 收到 Ctrl+C，正在停止并清理")
     except RegistrationCancelled:
         cli_log("[!] 注册被停止")
     except Exception as exc:
-        cli_log(f"[!] 任务异常: {exc}")
+        cli_log(f"[!] 任务异常: {redact_sensitive_log_line(str(exc))}")
     finally:
         try:
             signal.signal(signal.SIGINT, signal.SIG_IGN)

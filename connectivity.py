@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from email_providers import cloudflare as cloudflare_provider
 from proxy_pool import ProxyPoolError, load_proxy_urls
+from webui.security_utils import redact_log_line
 
 CheckResult = Tuple[str, bool, str]  # name, ok, detail
 XAI_SIGNUP_CHECK_NAME = "xAI注册页"
@@ -50,10 +51,10 @@ def check_proxy(proxy_url: str, http_get: Callable) -> CheckResult:
             )
         except Exception as exc:
             # TCP 通但出站失败也提示
-            return "代理", False, f"TCP 通，出站探测失败: {exc}"
+            return "代理", False, f"TCP 通，出站探测失败: {redact_log_line(str(exc))}"
         return "代理", True, f"{host}:{port} 可用"
     except Exception as exc:
-        return "代理", False, str(exc)
+        return "代理", False, redact_log_line(str(exc))
 
 
 def check_xai_signup(proxy_url: str, http_get: Callable) -> CheckResult:
@@ -107,7 +108,7 @@ def check_xai_signup(proxy_url: str, http_get: Callable) -> CheckResult:
             return XAI_SIGNUP_CHECK_NAME, False, f"HTTP {status or 'unknown'}"
         return XAI_SIGNUP_CHECK_NAME, True, f"可达 HTTP {status}"
     except Exception as exc:
-        return XAI_SIGNUP_CHECK_NAME, False, str(exc)
+        return XAI_SIGNUP_CHECK_NAME, False, redact_log_line(str(exc))
 
 
 def has_blocking_xai_failure(results: List[CheckResult]) -> bool:
@@ -274,7 +275,7 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
 
         return "邮箱API", True, f"提供商 {provider} 跳过深度探测"
     except Exception as exc:
-        return "邮箱API", False, str(exc)
+        return "邮箱API", False, redact_log_line(str(exc))
 
 
 def check_cpa(config: dict, http_get: Callable) -> CheckResult:
@@ -340,7 +341,7 @@ def check_cpa(config: dict, http_get: Callable) -> CheckResult:
                 return "CPA", False, f"CPA 服务异常 HTTP {resp.status_code}"
             parts.append(f"远程OK HTTP {resp.status_code}")
         except Exception as exc:
-            return "CPA", False, f"远程探测失败: {exc}"
+            return "CPA", False, f"远程探测失败: {redact_log_line(str(exc))}"
     return "CPA", True, "；".join(parts) if parts else "OK"
 
 

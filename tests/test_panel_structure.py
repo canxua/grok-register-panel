@@ -101,7 +101,7 @@ def test_help_and_faq_module():
     assert 'permission-denied' in html
     assert 'function setAppView(view, options = {})' in mon
     assert 'function toggleAppView()' in mon
-    assert 'element.inert = isHelp;' in mon
+    assert 'element.inert = isOverlay;' in mon
     assert 'help.inert = !isHelp;' in mon
     assert 'function setHelpTab(name)' in mon
     assert 'function handleHelpTabKey(event)' in mon
@@ -110,6 +110,30 @@ def test_help_and_faq_module():
     assert '访问令牌不匹配，请重新输入当前面板令牌' in mon
     assert '—' not in html
     assert '–' not in html
+
+def test_proxy_pool_panel_structure():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
+    worker = (ROOT / 'grok_register_ttk.py').read_text(encoding='utf-8')
+    assert 'id="proxy-view-toggle"' in html
+    assert 'id="proxy-view"' in html
+    assert 'id="proxy-input"' in html
+    assert 'id="proxy-summary"' in html
+    assert 'id="proxy-body"' in html
+    assert 'function refreshProxies(' in mon
+    assert 'function renderProxyPool(' in mon
+    assert 'function importProxyInput(' in mon
+    assert 'function testProxies(' in mon
+    assert 'function setProxyEnabled(' in mon
+    assert 'function deleteProxyItem(' in mon
+    assert '/api/proxies/import' in mon
+    assert '/api/proxies/test' in mon
+    assert 'def do_PATCH(self):' in mon
+    assert 'def do_DELETE(self):' in mon
+    assert 'worker_proxy_snapshot as _managed_worker_proxy_snapshot' in worker
+    assert 'pool = load_proxy_pool()' in worker
+    assert '面板代理池没有健康且启用的代理' in worker
+    assert 'redact_proxy(px)' in worker
 
 def test_panel_security_and_recovery_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
@@ -141,5 +165,6 @@ if __name__ == '__main__':
     test_reference_motion_and_reduced_motion()
     test_compact_overview_density()
     test_help_and_faq_module()
+    test_proxy_pool_panel_structure()
     test_panel_security_and_recovery_structure()
     print('OK structure')

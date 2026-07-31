@@ -31,6 +31,7 @@ from playwright.sync_api._generated import Playwright as _SyncPlaywright
 from camoufox_adapter import CamoufoxBrowser, CamoufoxPage
 from secure_files import ensure_private_dir
 from webui.blacklist_store import read_blacklist
+from webui.security_utils import redact_log_line, redact_proxy
 
 
 class SafeCamoufox(_Camoufox):
@@ -467,11 +468,13 @@ def _resolve_proxy_exit_ip(proxy_str: str, timeout: float = 8.0, log_callback=No
             hard_fails += 1
             if log_callback:
                 host = url.split("/")[2]
-                log_callback(f"[Debug] 出口 IP 探测失败 {host}: {exc}")
+                log_callback(f"[Debug] 出口 IP 探测失败 {host}: {redact_log_line(str(exc))}")
             if hard_fails >= 2:
                 break
             continue
-    raise RuntimeError(f"代理出口 IP 探测失败(timeout={per_try}s): {last_exc}")
+    raise RuntimeError(
+        f"代理出口 IP 探测失败(timeout={per_try}s): {redact_log_line(str(last_exc))}"
+    )
 
 
 def _build_camoufox_proxy(proxy_str: str) -> dict:
@@ -609,7 +612,7 @@ def create_browser_options(unique_profile=True) -> dict:
                 raise
             set_exit_context(proxy=proxy, exit_ip="")
             raise RuntimeError(
-                f"代理不可用或过慢，无法解析出口 IP（将换 sticky）: {ip_exc}"
+                f"代理不可用或过慢，无法解析出口 IP（将换 sticky）: {redact_log_line(str(ip_exc))}"
             ) from ip_exc
     else:
         set_exit_context(proxy="", exit_ip="")
@@ -711,7 +714,7 @@ def start_browser(log_callback=None) -> Tuple[object, object]:
                 meta = str(getattr(_tls, "exit_meta", "") or "")
                 if eip or bpx:
                     extra = f" | {meta}" if meta else ""
-                    log_callback(f"[*] 出口IP={eip or '?'} 代理={bpx or '?'}{extra}")
+                    log_callback(f"[*] 出口IP={eip or '?'} 代理={redact_proxy(bpx) or '?'}{extra}")
             if log_callback and attempt > 1:
                 log_callback(f"[*] 浏览器第 {attempt} 次启动成功")
             return browser_obj, page_obj
@@ -720,7 +723,7 @@ def start_browser(log_callback=None) -> Tuple[object, object]:
             streak = _note_start_failure()
             if log_callback:
                 log_callback(
-                    f"[Debug] 浏览器启动失败(第{attempt}/4次, 连续失败{streak}): {exc}"
+                    f"[Debug] 浏览器启动失败(第{attempt}/4次, 连续失败{streak}): {redact_log_line(str(exc))}"
                 )
             # 同一 sticky 出口探测失败：再试 3 次无意义，交给上层换口
             msg = str(exc)

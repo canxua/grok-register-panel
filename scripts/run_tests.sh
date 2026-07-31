@@ -15,6 +15,8 @@ tests=(
   tests/test_runtime_security.py
   tests/test_sso_recovery.py
   tests/test_monitor_http.py
+  tests/test_proxy_store.py
+  tests/test_proxy_worker_integration.py
   tests/test_panel_structure.py
   tests/test_no_live_hardcode.py
   tests/test_batch_chdir_import.py

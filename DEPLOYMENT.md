@@ -47,6 +47,10 @@ Worker 邮箱默认严格使用 `defaultDomains`，仅在邮件路由支持 wild
 
 Web/CLI 服务器路径不依赖 Tkinter；`tkinter` 仅是本机桌面 GUI 模式的可选依赖。
 
+面板“代理池”会把真实代理 URL 写入 `log/proxy_pool.json`，文件权限为 `0600`。
+导入后先完成探活；有面板池条目时 worker 只使用健康且启用的代理，全部异常或
+冷却时会停止对应任务。一个账号开始后，注册、SSO 与 OAuth 全程固定同一出口。
+
 ## 3. 发布前检查
 
 ```bash
@@ -70,6 +74,10 @@ export MONITOR_HOST=127.0.0.1
 export MONITOR_PORT=8787
 export PANEL_INCLUDE_TAIL=0
 export CPA_AUTH_DIR="$PWD/cpa_auth"
+# 可选：覆盖代理池状态位置与冷却时间
+# export PROXY_POOL_STATE_FILE="$PWD/log/proxy_pool.json"
+# export PROXY_NETWORK_COOLDOWN_SECONDS=90
+# export PROXY_RISK_COOLDOWN_SECONDS=1800
 
 .venv/bin/python -u webui/monitor.py
 ```
@@ -149,4 +157,5 @@ scripts/run_xvfb_batch.sh 10
 - 不要通过公网裸露内置 HTTP 服务。公网访问应放在有 TLS 和额外身份认证的反向代理后。
 - 生产环境不要启用原始日志尾部。
 - 不要把 Token 写入 URL、命令行参数、仓库或 issue。
+- 代理池 API 不返回账号密码，但 `log/proxy_pool.json` 本身含真实凭据，备份与迁移时按密钥材料处理。
 - 面板使用内置 HTTP 服务，适合单机、LAN 或 tailnet 运维，不替代互联网边界网关。

@@ -6,7 +6,9 @@
 - [ ] `python -m camoufox version` reports an installed browser engine.
 - [ ] The batch supervisor test restarts a simulated `_getChildFrames` driver crash and resumes only remaining slots.
 - [ ] `config.json`, all `proxies*.txt` / `stickies*.txt`, `accounts/`, auth directories, and `log/` are owner-only.
+- [ ] `log/proxy_pool.json` is `0600`; proxy API and rendered HTML never expose stored userinfo.
 - [ ] `MONITOR_TOKEN` is set and anonymous operational API requests return 401.
+- [ ] `PANEL_INCLUDE_TAIL=0` in the production environment.
 - [ ] If `PANEL_INCLUDE_TAIL=1`, operational APIs require authentication and returned log lines pass the redaction tests.
 - [ ] The monitor binds to the intended loopback, LAN, or Tailscale address only.
 - [ ] Blacklist state was migrated before replacing legacy source files.

@@ -30,6 +30,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
 | **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率和账号补录；操作 API 需 `MONITOR_TOKEN` |
+| 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
@@ -111,7 +112,7 @@ cp config.example.json config.json
 | `moemail_expiry_ms` | `3600000` / `86400000` / `604800000` / `0`，分别为 1 小时、1 天、7 天、永久 |
 | `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
 | `proxy_file` | 可选代理池路径；支持绝对路径或项目内相对路径，优先于 `proxy` |
-| `proxies.txt` | 可选；多行代理，多 worker 轮换端口 |
+| `proxies.txt` | 可选的旧版多行代理文件；未配置面板代理池时继续兼容 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
 | `register_count` | 单次目标数量 |
 | `max_slot_retry` | 单个账号槽位的软故障重试次数；受控金丝雀可设为 `0` |
@@ -133,6 +134,9 @@ cp config.example.json config.json
 | `BLACKLIST_STATE_FILE` | `./log/blacklist_state.json` | 运行时 ASN 黑名单状态 |
 | `GROK_BATCH_IDLE_TIMEOUT` | `360` | batch 子进程连续无输出多少秒后自动重建（最小 60 秒） |
 | `GROK_BATCH_MAX_RESTARTS` | `8` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `PROXY_POOL_STATE_FILE` | `./log/proxy_pool.json` | 外部代理池凭据、健康与冷却状态，文件权限 `0600` |
+| `PROXY_NETWORK_COOLDOWN_SECONDS` | `90` | 运行时网络异常的短冷却秒数 |
+| `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
 
 生成 token 示例：
 
@@ -160,6 +164,7 @@ python webui/monitor.py
 1. 页面顶部 **控制** 区找到 **面板 Token** 输入框  
 2. 填入与 `MONITOR_TOKEN` **相同**的字符串（自动写入 `localStorage`）  
 3. 设模式 / workers / batch 数量 / 再跑 N / 风控满 N → **启动**
+4. 需要多出口时打开顶部 **代理池**，导入代理并等待检测完成
 
 也可在控制台手动写入：
 
@@ -219,10 +224,24 @@ python grok_register_ttk.py
 | 接口 | 鉴权 |
 |------|------|
 | `GET /` · `GET /api/health` | 可匿名；不返回运行数据 |
-| `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` | 配置了 Token 后必须鉴权 |
-| `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
+| `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` · `/api/proxies` | 配置了 Token 后必须鉴权 |
+| `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` · `/api/proxies/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
+| `PATCH /api/proxies/{id}` · `DELETE /api/proxies/{id}` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
 
 前端 `api()` 会从 Token 输入框 / `localStorage.MONITOR_TOKEN` / `window.MONITOR_TOKEN` 自动带头。
+
+### 外部代理池
+
+- 支持单条或批量粘贴 `http://user:pass@host:port`、`host:port:user:pass`，也兼容 HTTPS / SOCKS URL
+- 导入时规范化并去重，随后后台并发探活；GET 接口轮询检测进度
+- API 和 UI 只返回脱敏端点及 `has_auth`，不会返回代理账号或密码
+- worker 只选择“健康 + 启用”的条目，并在每个新账号创建浏览器前热加载一次
+- 一个账号从注册、SSO 到 OAuth 始终固定同一代理，不会中途更换出口
+- 网络异常进入短冷却，注册风控进入长冷却；邮箱域名、验证码或邮箱 API 错误不处罚代理
+- 面板池已有条目但没有健康代理时任务会明确停止，不会绕过状态回退到旧文件
+- `proxies.txt` 可从界面导入；只有面板池完全未配置时，worker 才直接兼容旧文件 / `config.proxy`
+
+代理池不抓取、不分发公共代理，只管理操作者自己提供的外部代理。
 
 ### 时段成功率
 
@@ -285,6 +304,7 @@ Cloudflare Worker 的 `defaultDomains` 默认按原值创建邮箱。只有邮�
 │   ├── monitor.py             # Live 面板 HTTP 服务
 │   ├── security_utils.py      # redact / token 校验
 │   ├── blacklist_store.py     # 锁保护的 JSON 黑名单状态
+│   ├── proxy_store.py         # 外部代理池、探活、冷却与脱敏视图
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
 │   └── blacklist_ops.py       # 面板黑名单接口
@@ -328,7 +348,10 @@ A: 默认关闭防泄密。需要时 `export PANEL_INCLUDE_TAIL=1` 后重启 `mo
 A: CPA 已达旧目标。面板填大 **再跑 N 个** 再启动；编排器用 `add_count` 抬目标。
 
 **Q: 全是「无法解析出口 IP」？**  
-A: 代理挂了 / 流量耗尽 / dialer 下游失败。先 `curl -x http://127.0.0.1:端口 https://httpbin.org/ip` 探活。
+A: 打开顶部“代理池”查看异常和冷却原因，重新检测后只启用健康条目。旧版单代理仍可用 `curl -x http://127.0.0.1:端口 https://httpbin.org/ip` 单独探活。
+
+**Q: 提示“面板代理池没有健康且启用的代理”？**
+A: 导入项尚未检测、已停用、检测失败或仍在冷却。先在代理池页面执行“检测全部”；面板池已配置时不会回退复用旧文件中的坏代理。
 
 **Q: 邮箱 API 401？**  
 A: 与代理无关，检查 `config.json` 里对应 provider 的 key / auth_mode。
@@ -368,7 +391,7 @@ bash brain/bin/qmd update
 ## 安全
 
 - **必须**设置 `MONITOR_TOKEN`；不要把 token 提交进仓库或贴进公开 issue  
-- **不要提交** `config.json`、`accounts/`、`cpa_auth/`、`proxies.txt`、真实 stickies、`log/monitor.token`  
+- **不要提交** `config.json`、`accounts/`、`cpa_auth/`、`proxies.txt`、`log/proxy_pool.json`、真实 stickies、`log/monitor.token`
 - `.gitignore` 已忽略上述路径  
 - 运行数据、日志、PID、代理和账号文件使用 0600，父目录使用 0700
 - API 响应带 CSP、禁止 iframe、安全类型与 Referrer Policy；请求体上限 64 KiB

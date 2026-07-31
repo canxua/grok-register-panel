@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from webui import monitor
+from webui import proxy_store
 
 
 def test_control_defaults_are_single_account_batch():
@@ -86,6 +87,9 @@ def test_monitor_http_auth_and_headers():
         assert status == 200
         assert "pending_count" in json.loads(body)
 
+        status, _, body = request(base + "/api/proxies")
+        assert status == 401
+
         status, _, _ = request(
             base + "/api/control",
             method="POST",
@@ -110,6 +114,88 @@ def test_monitor_http_auth_and_headers():
             os.environ["MONITOR_TOKEN"] = previous
 
 
+def test_proxy_api_auth_mutations_and_redaction():
+    token = "test-proxy-token-123456"
+    secret = "proxy-secret-value-99"
+    previous_token = os.environ.get("MONITOR_TOKEN")
+    previous_paths = (
+        proxy_store.STATE_PATH,
+        proxy_store.LOCK_PATH,
+        proxy_store.LEGACY_PATH,
+    )
+    with tempfile.TemporaryDirectory() as temp:
+        base_path = Path(temp)
+        proxy_store.STATE_PATH = base_path / "log" / "proxy_pool.json"
+        proxy_store.LOCK_PATH = base_path / "log" / "proxy_pool.json.lock"
+        proxy_store.LEGACY_PATH = base_path / "proxies.txt"
+        os.environ["MONITOR_TOKEN"] = token
+        server = monitor.ThreadingHTTPServer(("127.0.0.1", 0), monitor.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            payload = json.dumps(
+                {"proxies": f"proxy.example:8080:worker:{secret}"}
+            ).encode("utf-8")
+            status, _, _ = request(
+                base + "/api/proxies/import",
+                method="POST",
+                body=payload,
+            )
+            assert status == 401
+
+            status, _, body = request(
+                base + "/api/proxies/import",
+                token=token,
+                method="POST",
+                body=payload,
+            )
+            assert status == 200
+            imported = json.loads(body)
+            assert imported["imported_count"] == 1
+            assert secret not in body.decode("utf-8")
+            proxy_id = imported["items"][0]["id"]
+
+            status, _, body = request(base + "/api/proxies", token=token)
+            assert status == 200
+            assert secret not in body.decode("utf-8")
+            assert json.loads(body)["items"][0]["has_auth"] is True
+
+            status, _, body = request(
+                base + f"/api/proxies/{proxy_id}",
+                token=token,
+                method="PATCH",
+                body=b'{"enabled":false}',
+            )
+            assert status == 200
+            assert json.loads(body)["items"][0]["enabled"] is False
+
+            status, _, _ = request(
+                base + f"/api/proxies/{proxy_id}",
+                method="DELETE",
+            )
+            assert status == 401
+            status, _, body = request(
+                base + f"/api/proxies/{proxy_id}",
+                token=token,
+                method="DELETE",
+            )
+            assert status == 200
+            assert json.loads(body)["summary"]["total"] == 0
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            (
+                proxy_store.STATE_PATH,
+                proxy_store.LOCK_PATH,
+                proxy_store.LEGACY_PATH,
+            ) = previous_paths
+            if previous_token is None:
+                os.environ.pop("MONITOR_TOKEN", None)
+            else:
+                os.environ["MONITOR_TOKEN"] = previous_token
+
 def test_non_loopback_requires_token():
     env = dict(os.environ)
     env.pop("MONITOR_TOKEN", None)
@@ -131,5 +217,6 @@ def test_non_loopback_requires_token():
 if __name__ == "__main__":
     test_control_defaults_are_single_account_batch()
     test_monitor_http_auth_and_headers()
+    test_proxy_api_auth_mutations_and_redaction()
     test_non_loopback_requires_token()
     print("OK monitor http")
