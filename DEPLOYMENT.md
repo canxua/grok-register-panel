@@ -136,13 +136,26 @@ curl -H "Authorization: Bearer $MONITOR_TOKEN" http://目标地址:8787/api/stat
 
 第二条状态接口在未带 Token 时应返回 `401`。
 
-同机接入 CLIProxy 时，先保持 `CPA_AUTO_VERIFY=0`，再为 systemd 增加一个仅 root 可读
-的 secret EnvironmentFile。单账号金丝雀前切到 `CPA_AUTO_VERIFY=1`，并确认：
+同机接入 AI Stack 时，先保持 `CPA_AUTO_VERIFY=0`，再为 systemd 增加一个仅 root 可读
+的 secret EnvironmentFile。除 CLIProxy Management 与公网数据面配置外，设置：
+
+```bash
+CPA_CONTROLLER_URL=http://127.0.0.1:9000
+CPA_CONTROLLER_TOKEN=CONTROLLER_OPS_TOKEN
+```
+
+只复制 controller 的 ops Token，不加载含数据库和加密主密钥的完整 controller env。
+单账号金丝雀前临时切到 `CPA_AUTO_VERIFY=1`，并确认：
 
 1. `log/cpa_states.jsonl` 依次出现 `provider_verified`、`pool_uploaded`、
    `pool_loaded`、`data_plane_verifying`、`verified`；
 2. `/api/status` 的 `credential_verification.verified` 增加；
 3. `register_results.jsonl` 仅对最终状态写 `status=ok,state=verified`。
+4. controller `/v1/credentials` 精确出现本次 `auth_name`，CLIProxy 同名文件只有一份。
+
+配置 `CPA_CONTROLLER_URL` 后，面板不再绕过 controller 直接上传；controller import 负责
+写入 CLIProxy 和 upsert 监控状态，随后面板仍独立检查热加载与公网数据面。未配置
+controller 时保留原 Management API 直传作为兼容路径。
 
 ## 6. 运行任务
 

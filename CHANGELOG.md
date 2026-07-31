@@ -3,12 +3,16 @@
 ## Unreleased
 
 - Add a feature-flagged CPA publication state machine with exact-token provider
-  verification, Management API upload, hot-load confirmation, and a strict
+  verification, controller-tracked import, hot-load confirmation, and a strict
   OpenAI-compatible data-plane probe.
 - Persist masked per-credential verification transitions and count only
   `verified` as success when the gate is enabled.
 - Give the exact-provider probe enough bounded output budget to complete while
   continuing to reject generic HTTP 200 and incomplete responses.
+- Prefer Authorization Code credentials for Grok Build, retain Device Flow as
+  fallback, and keep pending recovery on the managed registration exit.
+- Optionally register every verified auth through the AI Stack pool controller
+  so controller health state and CLIProxy runtime files share one write path.
 - Supervise headless batches and automatically resume remaining task slots after a Playwright/Camoufox driver crash or stall.
 - Persist batch slot progress atomically so completed accounts are not repeated during recovery.
 

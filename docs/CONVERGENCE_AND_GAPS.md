@@ -5,20 +5,18 @@
 
 ## 0. 结论先行
 
-1. **新 register-panel 已经能独立完成单账号注册，但还没有独立完成账号供给闭环。**
-   新面板生成的 `cpa_auth/*.json` 与现有 CLIProxyAPI 的 auth volume 是两个目录，当前
-   没有自动同步。先补这条桥并做真实数据面 canary，才可以退役旧补号 worker。
-2. **旧补号组可以收敛，但应分两阶段。** `pool-auth-worker`、standby、browser
-   registration context 和 `mail-relay` 可在桥接验收后先停；`pool-controller` 还承担
-   auth 健康与运维入口，应在替代这些能力、调整 Cloudflare Tunnel 依赖后最后处理。
+1. **新 register-panel 已完成一个单账号供给闭环。** 新 auth 已经过精确 provider、
+   controller import、CLIProxy 热加载和公网数据面，最终状态为 `verified`。controller
+   与 CLIProxy 不再由面板分别写两份状态。
+2. **旧补号组当前保留。** 这是用户明确决定。`pool-controller` 现在还是新面板凭据导入、
+   健康状态和 `ops.canxu.top` 的正式组成；没有新的退役动作。
 3. **动态住宅的关键不是“每个 HTTP 请求换 IP”，而是“每个账号生成一个新 session，
    账号全流程保持同一出口，下一个账号再换”。** OVH 能直连供应商 gateway 时直接接；
    直连不稳时才用 mihomo `dialer-proxy` 增加中转层。
 4. **managed proxy pool 是出口控制器，SQLite lease 是并发所有权。** 前者判断代理是否
    健康、何时冷却；后者保证同一时刻只有一个 worker 占用该账号任务和 session。
-5. **面板的 `ok` 目前过早。** 现状在账号文件写入后即记录 `ok`，即便 CPA 入库失败；
-   目标口径必须经过“精确 token 探针、上传、热加载确认、现有数据面探针”后才进入
-   `verified`，并且只有 `verified` 计入自动成功。
+5. **面板自动成功口径已经收紧。** 开启门禁时，必须经过“精确 token 探针、controller
+   导入、CLIProxy 热加载、现有数据面探针”后才进入 `verified`；默认开关仍关闭。
 
 ## 1. 证据范围与当前快照
 
@@ -27,14 +25,13 @@
 | 证据 | 核验范围 | 用途 |
 |---|---|---|
 | OVH 只读运行审计 | 2026-07-31 | 进程、容器、内存、磁盘、目录挂载和真实依赖 |
-| 当前仓库源码 | 本地 `19866b2`，运行逻辑基线 `4d370a1` | 判断当前能力和接线缺口 |
+| 当前仓库源码 | 本地与 OVH 运行基线 `7af0e72` | 判断当前能力和接线缺口 |
 | 上游仓库 | `d0b7c6cdf30e2193acd1e9eb6d56b0e5201daad1` | managed proxy pool 的已合并实现 |
-| LINUX DO 本地完整导出 | 主题 #2673498，2026-07-29 18:23 至 2026-07-30 09:13，共 160 层 | 最近社区实践、供应商和出口策略 |
+| LINUX DO 本地完整导出与近期主题 | #2673498、#2680750，核验到 2026-08-01 | 社区实践、WARP 和出口策略 |
 | 供应商与 mihomo 官方文档 | 2026-07-31 重新核验 | session、sticky、health-check、链式出口语义 |
 
-本地帖子导出时间是 2026-07-30 09:17（Asia/Shanghai）。后续实时访问受到站点
-Cloudflare challenge 限制，因此本文能确认的“最近几天”一手社区证据截止该导出时间；
-没有把搜索引擎的旧摘要当成 7 月 31 日新结论。
+社区经验只用于提出 canary 假设。WARP 的模式和边界以 Cloudflare 官方文档为准；当前
+系统是否可用以 OVH 精确探针和数据面回归为准。
 
 ### 1.2 当前真实拓扑
 
@@ -42,11 +39,13 @@ Cloudflare challenge 限制，因此本文能确认的“最近几天”一手�
 flowchart LR
     operator["运维者"] -->|"SSH 隧道"| panel
 
-    subgraph new_panel["新 register-panel"]
+    subgraph new_panel["新 register-panel - OVH"]
         panel["Monitor<br/>systemd / loopback"]
         worker["1 个注册 worker<br/>Xvfb + Camoufox"]
-        panel_store[("本地 cpa_auth<br/>当前 1 条 auth")]
+        proxy["Managed proxy pool<br/>WARP local proxy"]
+        panel_store[("私有 cpa_auth<br/>当前 3 条 auth")]
         panel --> worker --> panel_store
+        proxy --> worker
     end
 
     worker --> mail["Cloudflare 邮箱"]
@@ -69,17 +68,17 @@ flowchart LR
         newapi --> cpa["CLIProxyAPI"]
         newapi --> pg[("PostgreSQL")]
         newapi --> redis[("Redis")]
-        cpa --> live_auth[("CLIProxy auth volume<br/>当前 xai-primary")]
+        cpa --> live_auth[("CLIProxy auth volume<br/>104 enabled")]
     end
 
-    controller --> cpa
-    panel_store -. "当前缺失：上传 / 挂载 / 热加载桥" .-> live_auth
+    worker -->|"/v1/credentials/import"| controller
+    controller -->|"Management API"| cpa
     tunnel["cloudflared"] --> controller
     tunnel --> newapi
 ```
 
-这张图解释了为什么“新注册能成功”和“旧补号组件可立即删除”不是同一件事：新面板
-已经产出可用 auth，但现有 API 请求仍只消费 AI stack 自己的 auth volume。
+新面板不直接把“本地文件存在”当成功；controller 是正式导入入口，CLIProxy 是运行池，
+公网数据面是最后验收。旧补号组按当前决策继续运行。
 
 ## 2. 旧架构是否应该去掉
 
@@ -107,20 +106,20 @@ Camoufox 浏览器引擎。
 | `.venv`、Camoufox cache、Xvfb | 保留 | Camoufox 运行依赖；Xvfb 只在任务期活跃 |
 | `config.json`、`accounts/`、`cpa_auth/`、`log/` | 保留并备份 | 配置、凭据和审计事实来源 |
 | 未使用的邮箱 provider 源码 | 保留源码、关闭配置 | 不常驻、不耗显著 RAM；删除会增加升级和回归成本 |
-| `pool-auth-worker` | 第一阶段停用 | 新面板 auth 自动进入数据面并连续通过 canary 后 |
-| `pool-auth-worker-standby` | 第一阶段停用 | 与旧 worker 同一退出条件 |
-| `browser-registration-context` | 第一阶段停用 | 只服务旧补号 worker，不是新 Camoufox/Xvfb |
-| `mail-relay` | 第一阶段停用 | 只服务旧补号链；确认无其他邮件消费者后 |
-| `pool-controller` | 最后处理 | 仍承担 CLIProxy auth 健康、禁用/删除和公开运维入口 |
+| `pool-auth-worker` | 当前保留 | 用户已决定暂不移除旧补号链 |
+| `pool-auth-worker-standby` | 当前保留 | 与旧 worker 同一决策 |
+| `browser-registration-context` | 当前保留 | 仍服务旧补号 worker；不是新 Camoufox/Xvfb |
+| `mail-relay` | 当前保留 | 仍服务旧补号链 |
+| `pool-controller` | 必须保留 | 新面板已通过它导入 auth；并承担健康和公开运维入口 |
 | `api-gateway`、`new-api`、`cli-proxy-api`、PostgreSQL、Redis | 保留 | 这是实际 API 数据面，不属于旧注册链 |
 | `cloudflared` | 保留并改依赖 | 同时暴露 New API；移除 controller 前先调整 route/depends_on |
 
-### 2.3 可回滚的收敛顺序
+### 2.3 将来若重新决定收敛时的可回滚顺序
 
 ```mermaid
 flowchart TD
     g0["G0 备份配置、auth 和 compose<br/>记录当前容器与请求基线"] --> g1
-    g1["G1 配置 loopback Management API 桥<br/>密钥来自 0600 secret"] --> g2
+    g1["G1 controller import 桥与四门禁<br/>当前已完成"] --> g2
     g2["G2 单账号完整 canary<br/>精确 token + 上传 + 热加载 + 数据面"] --> decision{"连续样本均 verified?"}
     decision -->|"否"| rollback["保持旧补号组运行<br/>修复分类后的单一缺口"]
     decision -->|"是"| g3["G3 只 stop 旧 worker / standby<br/>browser context / mail relay"]
@@ -130,11 +129,11 @@ flowchart TD
     g5 --> cleanup["保留回滚期后按容器名删除<br/>不做全局 docker prune"]
 ```
 
-第一阶段使用 `stop` 而不是 `rm`，compose 定义、volume 和 auth 都保留，出现回归可以
-原样启动。只有以下四个门禁同时通过，才进入 G3：
+当前不执行 G3。将来若用户重新决定收敛，第一阶段仍应使用 `stop` 而不是 `rm`，并且
+至少要求以下门禁持续通过：
 
 - 新 auth 已通过**该 auth 自身**的最小 provider 请求；
-- Management API 上传成功，CLIProxy 的 auth 列表能看到相同文件名/指纹；
+- controller import 成功，CLIProxy 的 auth 列表能看到相同文件名/大小；
 - 现有 api-gateway/New API 路径返回有效 `2xx` JSON；
 - 停止旧 worker 不影响已有账号的真实客户端请求。
 
@@ -155,11 +154,16 @@ flowchart TD
 | [#151](https://linux.do/t/topic/2673498/151) | 有人猜测 OAuth 前后 IP 一致性会影响结果 | 作为待验证假设；工程上仍应保持端到端 sticky |
 
 帖子里的 21 秒和 54 秒样本分别以 risk deny、`Access denied` 结束，不是成功速度基线。
-当前 OVH 的完整成功 canary 仍以约 70 秒（含独立数据面探针）为可信基线。
+当前 WARP canary 的两段有效执行时间约 66 秒；日常容量仍按约 50 至 80 秒/verified
+估算，一个样本不能形成 P95。
 
-### 3.2 当前最适合这台 OVH 的出口结构
+### 3.2 当前出口与真实动态住宅的边界
 
-推荐顺序不是先选品牌，而是先固定连接语义：
+当前已部署 Cloudflare WARP local proxy，受管池探活为健康，宿主机默认路由不变。它在
+一个单账号 canary 中解决了 OVH 直连 Turnstile 路径，但 WARP 不是住宅 ASN，也不提供
+每账号 session 轮换。
+
+若后续证据证明必须使用真实动态住宅，推荐顺序不是先选品牌，而是先固定连接语义：
 
 1. **首选：OVH 直接连接住宅供应商 gateway。** 每个 task 生成唯一 `SESSION_ID`，
    将同一条代理 URL 从注册页、OTP、SSO 一直用到 token 完成。
@@ -250,9 +254,9 @@ proxies:
 | cooldown | 暂停派单 | 失败后到 `next_retry_at` 前不再分配，避免持续撞同一坏出口 |
 | lease | 临时车钥匙 | 某 worker 在 TTL 内独占某 task/session，崩溃后可回收 |
 
-当前 OVH 分支只有轻量 `proxy_pool.py`，没有上游 `webui/proxy_store.py` 及完整面板
-接口。由于本地已经修改邮箱、重试、安全与共享代理文件，不能直接覆盖或生硬 cherry-pick；
-应以兼容适配方式移植状态存储和 API，再把现有 loader 接到它后面。
+当前 OVH 已部署 `webui/proxy_store.py`、面板导入/探活/冷却 API、worker 固定出口和
+恢复任务继承出口。池内目前有 1 个健康 WARP local proxy；历史住宅样本的 `407` 不是
+当前出口状态。缺少的是持久 lease 和真实动态住宅 provider，不是 managed pool 代码。
 
 ### 3.4 必须补充的失败分类
 
@@ -387,13 +391,12 @@ claim 必须在 `BEGIN IMMEDIATE` 事务中完成“选择 pending 行 + 写 wor
 
 ## 5. 怎样让面板自动显示“真正成功”
 
-### 5.1 现状为什么会出现假成功
+### 5.1 假成功怎样被消除
 
-源码中已有 `probe_cpa_record()`：它用本次 record 的 access token 对 Grok Build
-responses 接口发最小 `ping`。但当前注册主流程没有调用它；`add_sso_to_cpa()` 只要本地
-写入、远程上传或 Grok2API 任一动作成功就返回 true，而 CLI 之后无论 CPA 是否入库都
-记录 `status=ok`。所以当前 `ok` 的真实含义是“账号与 SSO 已保存”，不是“线上数据面
-已经能使用该 auth”。
+旧逻辑把“auth 已写文件”视作成功。当前 `add_sso_to_cpa()` 在 `CPA_AUTO_VERIFY=1` 时
+先使用本次 access token 做严格 provider 探针，再走 controller import、CLIProxy 热加载
+和公网数据面。任何一门失败都写入 pending，不增加 verified；历史记录保持
+`legacy_unverified`。生产默认仍为 `CPA_AUTO_VERIFY=0`，只有受控 canary 临时开启。
 
 ### 5.2 目标状态机
 
@@ -407,7 +410,7 @@ stateDiagram-v2
     verification_retry --> provider_verifying: 有界退避
     verification_retry --> verification_failed: 超过重试预算
     provider_verified --> pool_uploading
-    pool_uploading --> pool_uploaded: Management API 接受
+    pool_uploading --> pool_uploaded: controller import 接受并登记
     pool_uploading --> pool_sync_failed: 鉴权 / 配置 / 写入失败
     pool_uploaded --> pool_loaded: auth 列表出现文件名与指纹
     pool_loaded --> data_plane_verifying
@@ -427,8 +430,8 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 
 1. **精确 provider 验证**：调用现有 `probe_cpa_record(record)`，它直接使用本次 token，
    能证明不是旧池里其他健康账号替它返回成功。
-2. **同步验证**：通过 loopback `cpa_remote_url` 上传，Management API 返回成功；管理密钥
-   从 systemd `EnvironmentFile` 或 0600 secret 读取，不展示在面板状态和日志。
+2. **同步验证**：通过 loopback `CPA_CONTROLLER_URL` 调用 `/v1/credentials/import`；
+   controller 负责写 CLIProxy 并 upsert 账号/凭据状态。Token 只在 0600 env 中。
 3. **热加载验证**：轮询 auth 列表，确认本次文件名和非秘密指纹已经被 CLIProxy 看到。
 4. **真实数据面验证**：从现有 api-gateway/New API 入口发送最小请求，要求 2xx、合法
    JSON 和预期模型响应；这验证的是用户真实调用路径，而不只是 provider 直连。
@@ -443,7 +446,7 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 |---|---|---|---|
 | 临时验证错误 | timeout、429、可恢复 5xx | 最多 2 次，1 秒/5 秒退避 | `verifying` 后 `verification_failed` |
 | 明确 provider 拒绝 | 响应语义为 Access denied、invalid token/grant | 不重试、不重注册，保留 auth | `provider_denied` |
-| pool 同步错误 | Management 401/403、地址或密钥缺失 | 终止当前同步，允许修配置后重放 | `pool_sync_failed` |
+| pool 同步错误 | controller 401/403/422、地址或 Token 缺失 | 终止当前同步，允许修配置后重放 | `pool_sync_failed` |
 | 数据面错误 | gateway 5xx、quota、无可用 auth | 不把账号判死；修数据面后重放 probe | `data_plane_failed` |
 | 成功 | 精确 token、热加载、真实路径均通过 | 原子写 `verified_at` | `verified` |
 
@@ -459,35 +462,37 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 
 | 优先级 | 能力 | 当前状态 | 解决方案 | 完成定义 |
 |---|---|---|---|---|
-| P0 | 新 panel -> CLIProxy auth 桥 | **已部署；已有 SSO 回放通过** | loopback Management API + 专用 0600 bridge env | 本次 auth 上传、热加载和数据面均为 200 |
-| P0 | 自动成功终态 | **四门禁已部署；回放到达 `verified`** | feature flag + `verified` 状态 | 新账号 canary 仍需越过 Turnstile 后验证 |
+| P0 | 新 panel -> AI Stack 凭据桥 | **已部署并进入 controller 监控** | controller import + CLIProxy hot load | 新 auth 在两边各精确匹配 1 条 |
+| P0 | 自动成功终态 | **新账号 canary 已到达 `verified`** | 四门禁 + `verified` 状态 | provider/controller/pool/public API 均 200 |
 | P0 | 代理日志脱敏 | **代码与发布测试已完成** | 所有输出统一 `redact_proxy()` | 测试与日志扫描无 credential |
-| P0 | 有效动态住宅资源 | **现有代理返回 407** | 更新供应商凭据/余额，按 task 生成 sticky session | 同一账号出口不变、下账号可轮换 |
-| P1 | managed proxy pool | **代码已合并部署；外部凭据返回 407** | 修复供应商授权/余额后启用 sticky session | 探活、短/长冷却、禁用、脱敏测试已通过 |
+| P0 | 当前可用注册出口 | **WARP local proxy 健康，1 个 canary 通过** | 保持单账号验证，不把 WARP 宣称为住宅 | 默认路由不变、同账号出口稳定 |
+| P1 | 真实动态住宅资源 | **未接入，也不是当前硬阻塞** | 只有持续数据证明需要时再接 sticky provider | 同账号不变、下账号可轮换、ASN 可观测 |
+| P1 | managed proxy pool | **已部署并被注册/恢复共用** | 继续补 SQLite lease | 探活、冷却、禁用、fail closed 已有测试 |
 | P1 | SQLite 任务账本 | **未实现** | jobs/tasks/accounts/proxies + WAL/lease | 重启、重复回调、worker crash 均不重复计数 |
-| P1 | 旧补号 worker 收敛 | **仍运行，约 155 MiB** | G0-G3 分阶段 stop | 停旧组后 24 小时真实请求无回归 |
-| P1 | controller 能力替代 | **未实现** | auth health、disable/delete、ops API 迁移 | cloudflared 改路由后 controller 可停 |
+| P1 | 旧补号 worker 收敛 | **按用户决定保留** | 当前不执行；未来按 G0-G3 | 只有新决定后才进入观察期 |
+| P1 | controller | **正式保留** | 作为统一导入和健康状态源 | 不再规划近期停用 |
 | P2 | 2 worker | **当前固定 1** | 两个独立健康 session 后 canary | 成功率/P95 不劣化且无 lease 冲突 |
 | P2 | 指标与成本 | **只有结果 JSONL** | 阶段时间、出口、流量、失败域指标 | 可算每个 verified 账号成本与 P95 |
 
-### 当前缺少的外部输入
+### 当前需要的下一步证据
 
-- 一份有效、余额正常且允许 OVH 连接的动态住宅代理凭据；
-- 决定是否继续保留旧 controller 的公开运维入口；这影响 cloudflared 的最终 route。
+- 间隔足够的更多单账号 canary，用于计算 verified 成功率和阶段 P95；
+- controller `ACTIVE=103` 与 CLIProxy `enabled=104` 的那 1 条历史差异盘点；
+- 是否部署 CPA-Manager-Plus 作为逐凭据额度读模型的明确决定。
 
-Management API 与数据面密钥已经通过专用 `0600` bridge env 接入。在其余输入到位前，
-不能把动态住宅、新账号端到端注册或旧组件退役写成“已完成”。
+controller、Management API 与数据面密钥均通过专用 `0600` bridge env 接入。动态住宅、
+SQLite 和额度看板仍不能写成“已完成”。
 
 ## 7. 推荐实施批次
 
-1. **批次 A：先闭环，不提并发。** 接 auth 桥、加精确 probe、真实数据面 probe 和状态
-   分类；保持 `batch=1/workers=1/max_slot_retry=0`。
-2. **批次 B：接动态出口。** 兼容移植 managed pool，先只录入一个 provider gateway，
-   每 task 渲染唯一 session，验证出口一致性、407 全局熔断和日志脱敏。
-3. **批次 C：持久化。** 引入 SQLite 和 lease，把 JSONL 降级为审计流；做 kill -9、服务
+1. **批次 A：闭环。已完成。** controller 桥、精确 probe、热加载和真实数据面均通过；
+   继续保持 `batch=1/workers=1/max_slot_retry=0`。
+2. **批次 B：受管出口。基础完成。** WARP local proxy 已进入 managed pool；真实动态住宅
+   只有出现明确需求证据后再接入。
+3. **批次 C：持久化。下一优先。** 引入 SQLite 和 lease，把 JSONL 降级为审计流；做 kill -9、服务
    重启、重复 callback 和 lease 过期回收测试。
-4. **批次 D：收敛旧组。** 按 G3 先停四个旧补号容器，保留 controller；观察通过后迁移
-   controller 能力并调整 cloudflared。
+4. **批次 D：历史池治理。** 盘点 controller/CLIProxy 差 1 条，明确 import、quarantine、
+   retire 的唯一状态源；旧组件当前不收敛。
 5. **批次 E：小幅扩容。** 只有两个独立 session 连续 canary 稳定后升到 2 workers；
    目标仍是 verified 成功率和单位成本，不是浏览器启动数。
 

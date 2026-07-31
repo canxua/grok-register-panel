@@ -1,6 +1,7 @@
 # 逐凭据额度与用量看板调研
 
-核验时间：2026-07-31。这里的“额度”必须拆成三类，否则会再次把文件数或健康状态
+核验时间：2026-08-01。候选项目已经完成调研，**当前尚未在 OVH 部署额度看板**。
+这里的“额度”必须拆成三类，否则会再次把文件数或健康状态
 误当成可用余额。
 
 | 指标 | 回答的问题 | 数据来源 |
@@ -9,8 +10,9 @@
 | Gateway usage | 经当前网关实际发生多少请求、token、成本、延迟和失败 | CLIProxy usage queue / request logger |
 | Auth health | 凭据是否 enabled、过期、被拒、冷却或 unavailable | CLIProxy auth-files 与探活结果 |
 
-`ops.canxu.top` 的 `ACTIVE`、CLIProxy auth JSON 数和 `verified` 也属于不同口径；任何新
-看板都应分别显示来源和更新时间。
+`ops.canxu.top` 当前为 controller `103 ACTIVE`，CLIProxy 为 `104 enabled`；`verified`
+又是面板四门禁口径。任何新看板都应分别显示来源和更新时间，不把 103/104 当成 token
+余额。
 
 ## 现网与官方能力
 

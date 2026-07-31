@@ -20,5 +20,7 @@
 - [ ] Desktop and mobile screenshots were reviewed in light and dark themes.
 - [ ] The systemd service restarts cleanly and survives a service restart.
 - [ ] No registration or recovery job is active during code synchronization.
+- [ ] When `CPA_CONTROLLER_URL` is configured, its mode-0600 ops Token imports
+      the canary exactly once into controller and CLIProxy; direct upload is not used.
 - [ ] Geist font files ship with `LICENSES/OFL-1.1-Geist.txt`.
 - [ ] Secret scanning reports no committed runtime credentials.

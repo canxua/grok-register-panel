@@ -14,3 +14,8 @@ Format: `- **YYYY-MM-DD** - Decision description. See <issue-ref>.`
 - **2026-07-31** - Adopt `craigcossairt/trellis` v1.1.0 with Codex/Grok adapters and a local project brain; preserve existing project docs and code. See `TRELLIS.md`.
 - **2026-07-31** - Inject only the required CLIProxy management and New API client keys through a dedicated mode-`0600` panel bridge env; do not load the controller's database-bearing secret file. See `CURRENT_STATE.md`.
 - **2026-07-31** - Keep the legacy stack after the first successful bridge replay; retirement requires multiple new-account end-to-end canaries and an explicit operator decision. See `CURRENT_STATE.md`.
+- **2026-08-01** - Keep automatic registration disabled after the first WARP-backed end-to-end canary; one successful account is evidence of reachability, not a sustained success-rate baseline. See `CURRENT_STATE.md`.
+- **2026-08-01** - Use Cloudflare WARP only as a scoped local-proxy registration exit; do not describe it as dynamic residential and do not replace the host default route. See `OPERATIONS_ARCHITECTURE.md`.
+- **2026-08-01** - Prefer Authorization Code for Grok Build credentials and retain Device Flow only as fallback because the exact Device credential was provider-denied. See `CURRENT_STATE.md`.
+- **2026-08-01** - Route verified panel auth through the AI Stack controller import API before CLIProxy hot-load verification, so monitoring and runtime state share one write path. See `7af0e72`.
+- **2026-08-01** - Keep the old replenishment components and pool controller running per the operator's decision; no resource-convergence action is currently scheduled. See `CONVERGENCE_AND_GAPS.md`.

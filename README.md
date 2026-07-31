@@ -136,6 +136,8 @@ cp config.example.json config.json
 | `CPA_AUTO_VERIFY` | `0` | 开启后只有精确 provider、上传、热加载、公网探针全部通过才计成功 |
 | `CPA_REMOTE_URL` | （空） | CLIProxy Management API 根地址；支持以 `/v0/management` 结尾 |
 | `CPA_MANAGEMENT_KEY` | （空） | Management API 密钥；也兼容 `CLIPROXY_MANAGEMENT_KEY` |
+| `CPA_CONTROLLER_URL` | （空） | AI Stack pool-controller 根地址；配置后由 controller 统一上传并登记 auth |
+| `CPA_CONTROLLER_TOKEN` | （空） | controller 运维 Token；只放在 mode `0600` 的环境文件 |
 | `CPA_DATA_PLANE_URL` | （空） | 公网 OpenAI 兼容入口根地址或完整 chat-completions 地址 |
 | `CPA_DATA_PLANE_KEY` | （空） | 数据面 API key；也兼容 `CLIPROXY_API_KEY` |
 | `CPA_DATA_PLANE_MODEL` | （空） | 金丝雀使用的模型名 |

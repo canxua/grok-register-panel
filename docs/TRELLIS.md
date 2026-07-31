@@ -8,6 +8,7 @@ This repository uses the project-continuity scaffold from
 - Trellis release: `v1.1.0`
 - Upstream commit: `486f84c75f6b283f6a05597a63b5ad7198aebd65`
 - Release date: 2026-07-24
+- Latest-tag recheck: 2026-08-01; upstream still exposes `v1.1.0` as the newest release tag
 - Integration style: selected-file merge into an existing repository
 - Package manager: none. This Trellis is a GitHub template, not the unrelated
   npm packages named `trellis` or `@mindfoldhq/trellis`.

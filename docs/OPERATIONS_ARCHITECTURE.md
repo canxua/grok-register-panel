@@ -1,306 +1,249 @@
 # 注册系统架构与运行流程
 
-本文记录当前 OVH 部署、完整注册状态机、已确认故障根因、实测耗时，以及从
-LINUX DO 帖子讨论和当前上游实现推导出的目标架构。
+本文描述 2026-08-01 在 OVH 上实际运行的架构、一次完整注册如何成为外部可用凭据、
+之前问题的分层根因，以及后续可复用到其他网站的工程方法。
 
-旧组件收敛、动态住宅 session、managed proxy pool、SQLite lease 和自动成功终态的
-详细决策见[系统收敛、动态出口与可靠性闭环](CONVERGENCE_AND_GAPS.md)。
-
-## 1. 文档口径
-
-- 核验日期：2026-07-31（Asia/Shanghai）
-- OVH 运行代码基线：`4d370a1`
-- 当次上游 `main`：`d0b7c6cdf30e2193acd1e9eb6d56b0e5201daad1`
-- OVH 成功样本：1 个完整 canary，包含邮箱 OTP、Turnstile、SSO、Device Flow、
-  access/refresh token 和 Grok Build 数据面 `HTTP 200`
-- 社区来源：[LINUX DO 主题 2673498](https://linux.do/t/topic/2673498)
-
-本文使用以下证据等级：
+## 1. 证据口径
 
 | 标记 | 含义 |
 |---|---|
-| 已实测 | 在当前 OVH 上跑通并留有日志或 HTTP 结果 |
-| 源码确认 | 能从当前仓库或官方上游代码确认 |
-| 社区经验 | 帖子作者或回复者的环境经验，不视为稳定保证 |
-| 工程推断 | 根据已有证据提出的设计建议，部署后仍需 canary 验证 |
+| 已实测 | 当前 OVH 有日志、状态或真实 HTTP 结果 |
+| 源码确认 | register-panel、AI Stack 或官方文档能确认 |
+| 社区经验 | LINUX DO 的近期实践，只作为 canary 假设 |
+| 工程推断 | 根据证据设计，仍需更多样本验证 |
 
-## 2. 当前已部署架构
+当前关键版本：
+
+- register-panel：`7af0e72`
+- AI Stack controller 文件名契约：`f31b737`
+- Trellis：`v1.1.0`
+- Cloudflare WARP：`2026.6.880.0`
+
+参考：
+
+- [LINUX DO 原始教程 2673498](https://linux.do/t/topic/2673498)
+- [近期 WARP/子域名讨论 2680750](https://linux.do/t/topic/2680750)
+- [Cloudflare WARP modes](https://developers.cloudflare.com/warp-client/warp-modes/)
+- [Cloudflare WARP Linux 安装](https://developers.cloudflare.com/warp-client/get-started/linux/)
+
+社区帖子说明“哪些组合值得试”，官方文档说明 WARP local proxy 的真实网络边界；两者都
+不能代替当前 OVH 的单账号验收。
+
+## 2. 当前生产架构
 
 ```mermaid
 flowchart LR
-    operator["Mac 浏览器 / 运维者"] -->|"SSH 隧道 :18080"| panel
-    subgraph ovh["OVH VPS - 2 vCPU / 3.7 GiB RAM"]
-        panel["Monitor 控制台<br/>systemd + Bearer Token"]
-        control["运行控制<br/>单批 / 单 worker / 单账号"]
-        checks["启动预检<br/>xAI / 邮箱 / CPA"]
-        worker["注册 worker<br/>Xvfb + Camoufox"]
-        config[("config.json<br/>0600")]
-        results[("日志与账号结果<br/>0600 / 0700")]
-        auth[("cpa_auth/*.json<br/>0600")]
-        legacy_proxy[("旧代理文件<br/>保留但停用")]
-        panel --> control --> worker
-        config --> checks --> worker
-        worker --> results
-        worker --> auth
-        legacy_proxy -. "当前凭据返回 407" .-> worker
+    operator["Mac 运维者"] -->|"SSH tunnel :18080"| panel
+    operator -->|"Cloudflare Access"| ops
+
+    subgraph ovh["OVH VPS"]
+        panel["Register Panel\nMonitor + 手动控制"]
+        runner["单账号 Worker\nXvfb + Camoufox"]
+        proxy_pool["Managed Proxy Pool\n探活 / 冷却 / fail closed"]
+        warp["WARP local proxy\n127.0.0.1:40000"]
+        local_state[("config / accounts / logs\ncpa_auth 0600")]
+        controller["AI Stack Pool Controller\n凭据状态与健康监控"]
+        cliproxy["CLIProxyAPI\n104 enabled auth"]
+        gateway["New API + API Gateway"]
+        ops["AI Stack 控制台\nops.canxu.top"]
+
+        panel --> runner
+        proxy_pool -->|"账号全流程固定出口"| runner
+        proxy_pool --> warp
+        runner --> local_state
+        runner -->|"verified auth import"| controller
+        controller -->|"Management API upload"| cliproxy
+        cliproxy --> gateway
+        controller --> ops
     end
-    worker -->|"OVH 直连 + 浏览器指纹"| signup["accounts.x.ai<br/>注册 / Turnstile / SSO"]
-    worker -->|"管理 API 直连"| mail["Cloudflare 邮箱 Worker<br/>relay742.de5.net"]
-    signup -->|"发送 OTP"| mail
-    worker --> oauth["xAI Device Flow<br/>verify / approve / token"]
-    oauth -->|"access + refresh token"| worker
-    auth -->|"当前仅独立探针"| build["Grok Build 数据面<br/>cli-chat-proxy.grok.com"]
+
+    warp -->|"Cloudflare egress"| xai["accounts.x.ai + OAuth + Grok Build"]
+    runner -->|"邮箱管理 API 直连"| mail["Cloudflare 二级域名邮箱"]
+    gateway --> clients["外部 API 使用者"]
 ```
 
-### 当前边界
+### 网络边界
 
-- 控制台只监听 `127.0.0.1:18080`，通过 SSH 隧道访问。
-- 邮箱管理流量走 OVH 直连，不经过注册代理。
-- 当前注册出口也是 OVH 直连，因为原有住宅代理样本均返回 `407 Proxy
-  Authentication Required`。
-- 运行参数固定为 `batch=1`、`workers=1`、`max_slot_retry=0`。
-- 新面板的 `cpa_auth/` 与现有 AI stack 的 CLIProxy auth volume 是两个目录；当前没有
-  自动上传、挂载或热加载桥，因此“本地 auth 可独立探测”不等于“现有 API 已消费它”。
-- 控制面和执行面仍在同一进程目录中共享 `config.json`、`log/`、`accounts/`
-  和 `cpa_auth/`。这是可运行的单机架构，不是完整的任务队列架构。
+- WARP 使用 local proxy mode；只有显式传入 `socks5h://127.0.0.1:40000` 的注册浏览器、
+  OAuth 和精确探针走 Cloudflare 出口。
+- 宿主机默认路由仍是 `ens3`。AI Stack、SSH、邮箱管理 API 和 loopback 管理调用没有被
+  全局改道。
+- loopback 请求由代码明确跳过外部 proxy，防止 controller/CLIProxy 调用绕远路。
+- WARP 是 Cloudflare 网络出口，不是住宅 ASN，也不是“每账号自动换 IP”的动态住宅池。
 
-## 3. 完整注册状态机
+### 数据存放位置
+
+| 数据 | 位置 | 说明 |
+|---|---|---|
+| 邮箱、SSO、注册结果 | OVH `/opt/grok-register-panel/accounts` | 私有运行材料，不进 Git |
+| 面板 auth | OVH `/opt/grok-register-panel/cpa_auth` | 原子写入，目录 0700、文件 0600 |
+| 恢复与状态日志 | OVH `/opt/grok-register-panel/log` | JSON/JSONL 是审计流，不是任务数据库 |
+| 受管代理 | OVH `log/proxy_pool.json` | 含敏感连接材料，API 只返回脱敏视图 |
+| 凭据业务状态 | AI Stack PostgreSQL | controller 的 ACTIVE/COOLDOWN/QUARANTINED/RETIRED |
+| 可调度 auth | CLIProxy auth volume | 数据面实际加载的 OAuth 文件 |
+| 本地 checkout | Mac Git 仓库 | 代码、文档和测试；不保存生产账号或 token |
+
+## 3. 完整注册到外部可用的流程
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as 运维者
-    participant Panel as Monitor
-    participant Runner as 注册引擎
-    participant Mail as Cloudflare 邮箱
-    participant Account as accounts.x.ai
-    participant OAuth as xAI Device Flow
-    participant Store as cpa_auth
-    participant Probe as 独立验收探针
-    participant Build as Grok Build
+    participant Panel as Register Panel
+    participant Pool as Managed Proxy Pool
+    participant Worker as Camoufox Worker
+    participant Mail as Cloudflare Mail
+    participant XAI as accounts.x.ai
+    participant OAuth as xAI OAuth
+    participant Provider as Grok Build Provider
+    participant Controller as AI Stack Controller
+    participant CPA as CLIProxyAPI
+    participant API as api.canxu.top
 
-    User->>Panel: 启动 1x1 单批任务
-    Panel->>Runner: xvfb-run 启动无头 worker
-    Runner->>Account: Chrome 指纹预检注册页
-    Account-->>Runner: HTTP 200
-    Runner->>Mail: 只读鉴权检查并创建精确域名邮箱
-    Mail-->>Runner: 返回邮箱 credential
-    Runner->>Account: Camoufox 提交邮箱
-    Account->>Mail: 发送 OTP
-    loop 轮询邮件列表与正文
-        Runner->>Mail: 查询新邮件
-    end
-    Mail-->>Runner: 返回 OTP
-    Runner->>Account: 提交 OTP
-    Runner->>Account: 填写资料并等待 Turnstile
-    Account-->>Runner: 设置 SSO cookie
-    Runner->>OAuth: 申请 device code
-    Runner->>OAuth: 使用同一会话 verify + approve
-    OAuth-->>Runner: access token + refresh token
-    Runner->>Store: 原子写入私有 auth JSON
-    Runner-->>Panel: 注册成功，自动流程结束
-    Note over Probe,Build: 当前为独立运维验收，不是 worker 内置阶段
-    Probe->>Store: 读取本次 canary auth
-    Probe->>Build: 最小 responses 请求
-    Build-->>Probe: HTTP 200 / grok-4.5
+    User->>Panel: 手动启动 batch=1 / worker=1
+    Panel->>Pool: 领取一个健康出口
+    Pool-->>Panel: WARP SOCKS lease
+    Panel->>Worker: 启动独立 profile
+    Worker->>XAI: 用同一出口做浏览器预检与注册
+    Worker->>Mail: 创建二级域名邮箱
+    XAI->>Mail: 发送 OTP
+    Worker->>Mail: 轮询并读取 OTP
+    Worker->>XAI: 提交 OTP、资料与 Turnstile
+    XAI-->>Worker: 设置 SSO cookie
+    Worker->>OAuth: Authorization Code 优先
+    OAuth-->>Worker: access/refresh token
+    Worker->>Worker: 私有原子写入 auth
+    Worker->>Provider: 用本次 token 做精确 responses 探针
+    Provider-->>Worker: 语义有效 HTTP 200
+    Worker->>Controller: POST /v1/credentials/import
+    Controller->>CPA: 上传同名 auth
+    Controller-->>Worker: account_id + credential_id
+    Worker->>CPA: 轮询文件名、大小和 enabled 状态
+    CPA-->>Worker: 热加载完成
+    Worker->>API: 从外部真实入口发最小请求
+    API-->>Worker: 合法 chat completion HTTP 200
+    Worker-->>Panel: verified
+    Panel-->>User: 自动成功 +1
 ```
 
-按照本文的运维验收口径，一个账号只有到最后一次数据面探测通过，才算完整成功。
-当前面板的自动成功计数止于 token 写入，数据面探针仍是独立步骤。以下结果都不能
-代替完整验收：
+### 为什么需要四道门
 
-- 注册页能打开
-- 邮箱 OTP 成功
-- 获得 SSO cookie
-- Device 页面显示 Authorized
-- token 文件已经生成但尚未调用数据面
+1. **精确 provider**：证明新 token 自己能用，不是旧池里的健康凭据代答。
+2. **controller import**：让凭据进入 AI Stack 的生命周期和健康监控。
+3. **CLIProxy 热加载**：证明数据面真的看见同名、同大小、enabled 的文件。
+4. **公网数据面**：证明外部用户实际调用的 gateway/New API/CLIProxy 全链正常。
 
-## 4. 之前故障的分层根因
+只有第四步完成后才是 `verified`。邮箱注册成功、SSO 落盘、token 写出或通用 API `200`
+都只是中间状态。
 
-之前看到的 `403`、`407` 和 `Access denied` 属于不同层，不能合并成一个
-“OVH 网络有问题”。
+## 4. 状态机
 
-| 现象 | 根因与证据 | 本次处理 |
-|---|---|---|
-| 面板在线但无法正常注册 | 旧配置仍使用占位域名，Cloudflare 管理鉴权和真实邮箱域名没有接入；面板存活不等于注册链路可用 | 接入已有二级域名邮箱，并完成建箱、SMTP 投递、邮件列表和正文读取 |
-| 普通 `curl` 请求注册页返回 `403` | 同一 OVH 出口下，普通请求为 `403`，Chrome impersonation 和 Camoufox 为 `200`；这是边缘 WAF/请求指纹差异，不是 IP 整体封禁 | 预检使用 Chrome 指纹，正式流程使用 Camoufox |
-| 住宅代理连接失败 | 当前代理池抽样返回 `407`，说明供应商凭据或订阅状态失效 | 保留代理材料但停用，当前 canary 使用已验证的 OVH 直连 |
-| 账号创建后 token 端点 `Access denied` | 这是 OAuth/provider eligibility 层的拒绝；网络可达、Device 页面成功都不能证明 token 一定签发 | 使用当前 CPA 对齐的 scopes 和 Device Flow，保持单变量 canary，并以真实 token 请求验收 |
+```mermaid
+stateDiagram-v2
+    [*] --> mail_created
+    mail_created --> otp_received
+    otp_received --> profile_submitted
+    profile_submitted --> sso_acquired
+    sso_acquired --> token_written
+    token_written --> provider_verified
+    token_written --> provider_denied
+    provider_verified --> controller_imported
+    controller_imported --> pool_loaded
+    pool_loaded --> data_plane_verifying
+    data_plane_verifying --> verified
+    data_plane_verifying --> data_plane_failed
+    controller_imported --> pool_sync_failed
+    verified --> [*]
+    provider_denied --> [*]
+    pool_sync_failed --> [*]
+    data_plane_failed --> [*]
+```
 
-当前 scopes 已与 CPA xAI client 对齐。源码明确记录，额外申请未授权的
-`conversations:*` scopes 会造成“consent 通过但 token 端点 Access denied”；但历史
-provider denial 不应全部归因于 scope，因为同样可能受到账号或风控资格影响。
+失败后保留私有 SSO/auth 供恢复。恢复流程只重做 OAuth、验证和同步，不重复创建邮箱和
+账号；只有 `verified` 才从 `sso_pending` 原子出队。
 
-## 5. 实测耗时与速度边界
+## 5. 之前问题的分层根因
 
-### OVH 完整成功 canary
+| 层 | 现象 | 根因 | 当前处理 |
+|---|---|---|---|
+| HTTP 指纹 | 普通 `curl` signup 返回 403 | 边缘 WAF 区分裸 HTTP/TLS 与浏览器请求，不是 OVH IP 完全断网 | Chrome-compatible 预检 + Camoufox 正式流程 |
+| 浏览器挑战 | OVH 直连停在 `wait-cf:0` | 当前直连会话没有通过资料页 Turnstile，发生在 SSO 之前 | worker 走健康 WARP local proxy；单 canary 已通过 |
+| 旧代理 | 历史代理样本返回 407 | 供应商授权/余额或凭据失效 | 不再作为当前出口；受管池为空时 fail closed |
+| OAuth | Device token 已签发但 provider 403 | token 能签发不代表 Grok Build eligibility；Device 与 Build 上下文不同 | Authorization Code 优先，Device 仅回退 |
+| 探针 | HTTP 200 仍判失败 | 2/16 token 预算令有效响应成为 `status=incomplete` | 精确 `pong` + 128 token，继续拒绝 incomplete |
+| 状态分叉 | CLIProxy 有文件，控制台没有新账号 | 面板绕过 controller 直传 | verified 路径统一调用 controller import |
+| 输入契约 | controller import 422 | CLIProxy 文件名含 `@`，模型正则不接受 | 允许 `@`，仍禁止路径字符 |
+| 恢复出口 | 注册成功，恢复又失败 | 恢复子进程没有继承 managed proxy | 复用同一健康代理快照，空池 fail closed |
 
-日志时间为 2026-07-30 UTC，粒度为秒，单阶段误差约为 1 秒。
+这些错误分别属于指纹、出口、OAuth eligibility、响应语义、状态同步和恢复上下文。把它们
+统称为“网络问题”会导致错误重试。
 
-| 阶段 | 时间点 | 近似耗时 |
-|---|---:|---:|
-| 启动、预检、浏览器准备 | 17:33:01 -> 17:33:07 | 6 秒 |
-| 账号开始到注册页就绪 | 17:33:07 -> 17:33:10 | 3 秒 |
-| 注册页、建箱、提交邮箱 | 17:33:10 -> 17:33:28 | 18 秒 |
-| 等待并提交 OTP | 17:33:28 -> 17:33:39 | 11 秒 |
-| 资料页与 Turnstile | 17:33:39 -> 17:34:01 | 22 秒 |
-| SSO cookie | 17:34:01 -> 17:34:02 | 1 秒 |
-| Device Flow 与 token 落盘 | 17:34:02 -> 17:34:03 | 1 秒 |
-| 账号主流程 | 17:33:07 -> 17:34:03 | **56 秒** |
-| 从进程启动到 token 完成 | 17:33:01 -> 17:34:03 | **62 秒** |
-| 独立 Grok Build 探针 | token 完成后单独执行 | **约 8 秒** |
-| 含数据面探针的运维验收 | 两段实测合计 | **约 70 秒** |
+## 6. 为什么这次能闭环
 
-本次最大可优化段是资料页 Turnstile，约占 18 至 21 秒。邮箱、页面网络和
-Turnstile 都属于外部等待，不能用本地 CPU 优化到零。
+不是单一“换 IP”起作用，而是以下条件同时成立：
 
-### 帖子时间样本如何解读
+1. 已有 Cloudflare 二级域名邮箱服务被正确接回新面板；
+2. Camoufox 保持浏览器指纹，受管 WARP 出口覆盖注册到 OAuth 的同一会话；
+3. Authorization Code 生成适用于 Grok Build 的 token；
+4. 精确探针预算足够完成响应，语义校验没有降低；
+5. controller import、CLIProxy 热加载和公网数据面成为同一成功事务；
+6. 恢复任务继承注册出口，避免“前半程一个网络、后半程另一个网络”。
 
-- 回复 #138 约 21 秒，但最终命中 `botFlagSource=1 / policy=deny`，没有进入 OAuth，
-  不是完整成功速度。
-- 回复 #149 从账号开始到 Device Flow 结束约 54 秒，但 token 端点返回
-  `Access denied`，同样不是完整成功。
-- 社区的成功率、流量和每 IP 数量差异很大，只能作为容量规划输入。
+**已实测事实：** 单账号完整闭环成功。
 
-### 可采用的速度目标
+**工程推断：** WARP 解决了本次直连挑战路径。
 
-| 指标 | 当前值 | 稳健目标 | 说明 |
-|---|---:|---:|---|
-| 进程启动到 token 延迟 | 约 62 秒 | **35 至 45 秒** | 要求邮箱在 5 秒内到达、Turnstile 快速通过、Device Flow 无重试；不是 SLA |
-| 含数据面验收 | 约 70 秒 | **40 至 55 秒** | 将最小 Grok Build 探针纳入完成口径 |
-| 常见稳定区间 | 约 60 至 80 秒 | **50 至 70 秒** | 更适合作为完整运维验收的日常容量估算 |
-| 当前并发 | 1 | **先 1，验证后最多 2** | 当前 OVH 为 2 vCPU / 3.7 GiB，先不要直接采用上游 2 至 3 的通用建议 |
-| 2 worker 活跃吞吐 | 未启用 | **约 2 至 3 个 token-complete 账号/分钟** | 前提是两个独立健康出口；不含账号间隔、探针排队和风控冷却 |
+**未知项：** 连续多天成功率、出口声誉变化和真实动态住宅的增益尚未测量。
 
-当前 `account_interval=120-240` 是风控保护，不影响单账号 batch，但在连续任务中会
-主动降低持续吞吐。生产目标应优先看完整成功率和每个可用 token 的成本，而不是只看
-浏览器完成速度。
+## 7. 当前耗时
 
-## 6. 帖子讨论得到的架构约束
+| 阶段 | 当前样本 |
+|---|---:|
+| 新账号启动到 Device token 结果 | 约 59 秒 |
+| 同一 SSO Authorization Code 恢复到 `verified` | 约 7 秒 |
+| 两段有效执行时间合计 | 约 66 秒 |
+| 历史完整成功样本 | 约 70 秒 |
 
-以下均是社区经验，需要结合当前环境 canary 验证：
+由于中间有人工诊断间隔，墙钟总时间不能用来代表自动化速度。当前合理容量口径仍是每个
+`verified` 约 50 至 80 秒，而不是页面提交耗时。一个样本不足以承诺 P95。
 
-1. 注册邮箱使用二级域名。帖子多人报告一级域名更容易失败；当前 `.net` 二级域名
-   已经实测成功，因此不能把 `.com` 当作硬性协议要求。
-2. 注册阶段使用动态住宅出口，每个新账号换新出口；同一账号从注册、SSO 到 token
-   换取期间保持 sticky，不在中途切换 IP。
-3. 下游长期使用阶段更适合稳定的静态住宅出口，与注册用动态池分离。
-4. 并发不是越大越快。帖子中高并发与空页、Turnstile 卡住、代理流量打满同时出现。
-5. 对网络错误做短冷却，对 registration risk 做长冷却；邮箱错误不能错误处罚代理。
-6. 链式出口应在 mihomo 等代理客户端完成，注册程序只看到一层 HTTP/SOCKS 入口。
-7. 帖子中的流量估算从 1 GiB 约 30 至 250 个账号不等，供应商计费和失败重试会显著
-   改变成本，不能直接作为预算承诺。
+## 8. 动态住宅与静态住宅的通俗解释
 
-## 7. 推荐目标架构
+- **注册像办新手机号。** 网站最关心“这个申请动作是否像正常个人”，所以需要干净、
+  稳定到足以完成一次会话、且账号之间可以更换的出口。这就是动态住宅 + sticky session
+  的价值。
+- **长期使用像固定上班地址。** 账号已经创建后，频繁换城市、运营商或 ASN 反而异常，
+  所以长期调用更适合稳定出口。
+- **WARP 是中间方案。** 它让注册流量离开 OVH 机房出口，但出口属于 Cloudflare，既不
+  等于住宅网络，也不保证下一账号自动换 IP。
 
-对当前规模，最佳方案不是立刻拆成很多服务器，而是在单台 OVH 上先把控制、任务、
-代理租约和凭据边界做清楚，再允许横向增加 worker。
+当前没有证据要求立刻购买动态住宅。先收集单账号 canary 的成功率；只有 WARP 持续失败
+且失败域确实是出口信誉时，再引入受管住宅 gateway。
+
+## 9. 可复用到其他网站的方法论
 
 ```mermaid
 flowchart LR
-    operator["运维者"] -->|"SSH / 私有网络"| control
-    subgraph control_plane["控制面 - OVH"]
-        control["Monitor + Scheduler"]
-        queue[("SQLite 任务与账号状态<br/>幂等键 / 租约 / 重放")]
-        policy["速率与风控策略<br/>并发 / 间隔 / 熔断"]
-        metrics[("阶段耗时与结果指标")]
-        control --> queue
-        policy --> control
-        control --> metrics
-    end
-    subgraph proxy_plane["出口面"]
-        pool["Managed Proxy Pool<br/>探活 / ASN / 冷却 / 脱敏"]
-        dynamic["动态住宅出口<br/>每账号一个租约"]
-        static["静态住宅出口<br/>下游长期使用"]
-        pool --> dynamic
-    end
-    subgraph execution_plane["执行面"]
-        w1["Worker 1<br/>独立 profile"]
-        w2["Worker 2<br/>独立 profile"]
-    end
-    mail["Cloudflare 二级域名邮箱<br/>管理 API 直连"]
-    xai["xAI 注册 + Device Flow"]
-    vault[("私有 auth store<br/>原子写入 / 审计")]
-    build["CPA / Grok Build"]
-    queue --> w1
-    queue --> w2
-    pool -->|"账号级 sticky lease"| w1
-    pool -->|"账号级 sticky lease"| w2
-    w1 --> mail
-    w2 --> mail
-    w1 -->|"同一出口完成全部阶段"| xai
-    w2 -->|"同一出口完成全部阶段"| xai
-    xai -->|"token response"| w1
-    xai -->|"token response"| w2
-    w1 --> vault
-    w2 --> vault
-    vault --> build
-    static --> build
-    w1 --> metrics
-    w2 --> metrics
+    discover["1. 发现真实注册协议"] --> identity["2. 身份材料\n邮箱/OTP/域名"]
+    identity --> session["3. 会话一致性\n指纹/出口/cookie"]
+    session --> credential["4. 产出凭据\nSSO/OAuth/API key"]
+    credential --> exact["5. 精确凭据验证"]
+    exact --> publish["6. 进入正式凭据池"]
+    publish --> e2e["7. 外部入口 E2E"]
+    e2e --> operate["8. 健康/额度/冷却/审计"]
 ```
 
-### 推荐运行策略
+通俗说就是：先证明“能注册”，再证明“新凭据自己能用”，然后证明“放进池后外面真的
+能调用”，最后才允许自动计成功和扩并发。每层保留独立错误码、时间和恢复动作，避免
+从头重复注册。
 
-- 邮箱面：保持 Cloudflare 管理 API 直连，继续使用已验证的二级域名。
-- 注册面：使用受管动态住宅池，一个账号获取一个 lease，直到 OAuth 完成才释放。
-- 使用面：CPA/Grok Build 走单独的稳定静态出口，不复用注册池的频繁轮换策略。
-- worker：当前主机先运行 1 个；代理池和连续 canary 通过后升到 2 个，每个 worker
-  必须拿到不同健康出口。
-- 状态：每个账号持久化 `mail_created -> otp_received -> profile_submitted ->
-  sso_acquired -> oauth_approved -> token_written -> data_plane_verified`。
-- 重试：只重试明确的临时网络错误；provider denial、registration risk 和认证错误
-  进入终态或冷却，不做无界重试。
+## 10. 当前边界
 
-## 8. 当前完成度与缺口
+- 自动注册关闭；没有后台批量任务。
+- 生产继续限制 1 worker；更多并发需要持久 lease 和至少两个独立健康出口。
+- controller `ACTIVE=103` 与 CLIProxy `enabled=104` 仍有 1 条历史差异待盘点。
+- SQLite 任务账本、逐凭据额度页面和真实动态住宅尚未实现。
+- 旧 AI Stack 组件按用户决定保留，不做资源收敛。
 
-| 能力 | 当前状态 | 下一步 |
-|---|---|---|
-| 二级域名邮箱端到端 | 已完成 | 增加时延和失败率指标 |
-| Chrome 指纹预检 + Camoufox | 已完成 | 保持与正式 worker 相同出口 |
-| 单账号 Device Flow + 数据面验收 | 已有完整人工样本；四门禁回放已自动到达 `verified` | 用新注册账号再跑一个完整 canary |
-| 安全控制台、loopback、Token、0600 | 已完成 | 可选接入 tailnet 或额外身份网关 |
-| 新 panel auth 进入现有 CLIProxy 数据面 | 已部署；已有 SSO 回放中 provider、热加载和公网数据面均为 200 | 继续保持默认关闭，只在单账号 canary 临时开启 |
-| 旧补号组件收敛 | 未完成 | 旧 5 容器约 155 MiB；auth 桥验收后先停 worker/browser/mail，controller 最后处理 |
-| 旧文件代理轮换 | 部分完成 | 当前凭据 `407`，不能用于生产扩容 |
-| 健康感知代理池与冷却 | 代码已部署，现有供应商材料返回 `407` | 修复供应商授权/余额后做 sticky 出口 canary |
-| 账号级代理 lease | 部分完成 | 当前按 worker 索引绑定，缺少持久 lease 和崩溃归还 |
-| 持久任务状态机与幂等 | 未完成 | 引入 SQLite；日志不再承担任务数据库职责 |
-| 全局和每出口速率限制 | 未完成 | 加 token bucket、Retry-After 和独立出口预算 |
-| 阶段级耗时指标 | 未完成 | JSONL 增加 phase timestamps / duration |
-| 凭据静态加密 | 未完成 | 当前依赖 0600；后续接入主机密钥或外部 secret store |
-| 注册出口与使用出口分离 | 未完成 | 有有效动态/静态住宅资源后再启用 |
-
-上游 `d0b7c6c` 已合并[受管外部代理池 PR #6](https://github.com/lij768423-svg/grok-register-panel/pull/6)，
-包含导入、探活、账号全流程固定出口、网络短冷却、风控长冷却和 fail-closed。
-当前 OVH commit 已兼容合并上游代理池、邮箱域名、共享代理文件和本地安全修复，并通过
-完整发布测试；外部住宅代理是否可用仍由供应商授权和余额决定。
-
-2026-07-31 的现网审计还确认：register-panel 常驻内存约 14 至 26 MiB；项目磁盘约
-1.6 GiB 主要由仍必需的 Camoufox cache（约 1.3 GiB）和 `.venv`（约 329 MiB）组成，
-并不是旧容器残留。完整的保留/停用矩阵和回滚门禁见
-[收敛文档第 2 节](CONVERGENCE_AND_GAPS.md#2-旧架构是否应该去掉)。
-
-## 9. 实施顺序
-
-1. **P0 - auth 桥（已完成）**：loopback Management API、热加载、专用 0600 secret
-   和公网数据面已经在生产回放中通过。
-2. **P0 - 真实成功门禁（桥接已完成）**：只有本次 token 的四道门禁全部通过才写
-   `verified`；新注册账号仍需通过 Turnstile 后再完成一次端到端 canary。
-3. **P0 - 补有效出口**：更新有效的动态住宅代理凭据；每账号生成一个 session 并全流程
-   sticky，保持 `workers=1` 做 canary。
-4. **P1 - 持久状态**：加入 SQLite task/account 幂等键、proxy lease、心跳、死信和重放。
-5. **P1 - 收敛旧组**：先停旧 worker、standby、browser context 和 mail relay；完成
-   controller 能力替代并调整 cloudflared 后，才处理 controller。
-6. **P1 - 再提并发**：连续样本稳定后升到 2 workers，要求两个独立健康 session；比较
-   verified 成功率、P95 和单位成本，而不是只比较平均速度。
-7. **P2 - 按需拆机**：只有单机 CPU、内存或浏览器稳定性成为真实瓶颈时，才拆分远程
-   worker；控制面、邮箱和 auth store 仍保持单一事实来源。
-
-## 10. 运维与验收入口
-
-- 部署和回滚：[DEPLOYMENT.md](../DEPLOYMENT.md)
-- 发布检查：[RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md)
-- 收敛与缺口：[CONVERGENCE_AND_GAPS.md](CONVERGENCE_AND_GAPS.md)
-- 项目总览：[README.md](../README.md)
-- 上游代理池提交：[`d0b7c6c`](https://github.com/lij768423-svg/grok-register-panel/commit/d0b7c6cdf30e2193acd1e9eb6d56b0e5201daad1)
+更细的持久化、lease、冷却和收敛方案见
+[系统收敛、动态出口与可靠性闭环](CONVERGENCE_AND_GAPS.md)。
