@@ -140,7 +140,7 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
                 parsed = urlparse(base)
                 host = parsed.hostname
                 if host:
-                    port = 443 if parsed.scheme == "https" else 80
+                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
                     if not _tcp_open(host, port):
                         return "邮箱API", False, f"Cloudflare 服务不可达: {host}:{port}"
                 note = ""

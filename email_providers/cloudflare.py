@@ -245,24 +245,27 @@ def create_mailbox_fallback(
     api_key: str = "",
     auth_mode: str = "none",
     custom_auth: str = "",
+    domain: str = "",
 ) -> tuple[str, str]:
-    domains = get_domains(
-        http_get,
-        api_base,
-        domains_path=domains_path,
-        api_key=api_key,
-        auth_mode=auth_mode,
-        custom_auth=custom_auth,
-    )
-    if not domains:
-        raise Exception("Cloudflare 无可用域名")
-    verified = [d for d in domains if d.get("isVerified")]
-    target = verified[0] if verified else domains[0]
-    domain = target.get("domain")
-    if not domain:
+    selected_domain = str(domain or "").strip()
+    if not selected_domain:
+        domains = get_domains(
+            http_get,
+            api_base,
+            domains_path=domains_path,
+            api_key=api_key,
+            auth_mode=auth_mode,
+            custom_auth=custom_auth,
+        )
+        if not domains:
+            raise Exception("Cloudflare 无可用域名")
+        verified = [d for d in domains if d.get("isVerified")]
+        target = verified[0] if verified else domains[0]
+        selected_domain = str(target.get("domain") or "").strip()
+    if not selected_domain:
         raise Exception("Cloudflare 域名数据格式错误，缺少 domain 字段")
     username = generate_username(10)
-    address = f"{username}@{domain}"
+    address = f"{username}@{selected_domain}"
     password = secrets.token_urlsafe(12)
     create_account(
         http_post,

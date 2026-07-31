@@ -72,6 +72,12 @@ from webui.proxy_store import (
     record_proxy_result as _record_managed_proxy_result,
     worker_proxy_snapshot as _managed_worker_proxy_snapshot,
 )
+from webui.email_domain_store import (
+    PROVIDER_LABELS as _EMAIL_DOMAIN_PROVIDER_LABELS,
+    SUPPORTED_PROVIDERS as _MANAGED_EMAIL_DOMAIN_PROVIDERS,
+    record_domain_result as _record_managed_email_domain_result,
+    select_domain as _select_managed_email_domain,
+)
 from webui.security_utils import redact_log_line as redact_sensitive_log_line
 from browser_session import (
 
@@ -826,12 +832,13 @@ def _pick_list_payload(data):
     return _pick_list(data)
 
 
-def cloudflare_create_temp_address(api_base):
+def cloudflare_create_temp_address(api_base, domain=""):
+    selected_domain = str(domain or "").strip() or cloudflare_next_default_domain()
     return cloudflare_provider.create_temp_address(
         http_post,
         api_base,
         accounts_path=get_cloudflare_path("cloudflare_path_accounts", "/api/new_address"),
-        domain=cloudflare_next_default_domain(),
+        domain=selected_domain,
         api_key=get_cloudflare_api_key(),
         auth_mode=get_cloudflare_auth_mode(),
         custom_auth=get_cloudflare_custom_auth(),
@@ -1665,12 +1672,16 @@ def yyds_pick_domain(api_key=None, jwt=None):
     return yyds_provider.pick_domain(http_get, api_key=api_key or get_yyds_api_key(), jwt=jwt or get_yyds_jwt())
 
 
-def yyds_get_email_and_token(api_key=None, jwt=None):
+def yyds_get_email_and_token(api_key=None, jwt=None, domain=""):
     key = api_key or get_yyds_api_key()
     token = jwt or get_yyds_jwt()
     if not token and not key:
         raise Exception("YYDS API Key 或 JWT 未配置")
-    domain = get_yyds_default_domain() or yyds_pick_domain(api_key=key, jwt=token)
+    domain = (
+        str(domain or "").strip()
+        or get_yyds_default_domain()
+        or yyds_pick_domain(api_key=key, jwt=token)
+    )
     username = yyds_generate_username(10)
     result = yyds_create_account(
         local_part=username, domain=domain, api_key=key, jwt=token
@@ -1721,9 +1732,17 @@ def get_cloudmail_password():
     return str(os.environ.get("CLOUDMAIL_PASSWORD") or config.get("cloudmail_password", "") or "")
 
 
-def cloudmail_get_email_and_token():
-    raw_domains = str(config.get("defaultDomains", "") or "")
-    domains = [item.strip() for item in re.split(r"[,，\s]+", raw_domains) if item.strip()]
+def cloudmail_get_email_and_token(domain=""):
+    selected_domain = str(domain or "").strip()
+    if selected_domain:
+        domains = [selected_domain]
+    else:
+        raw_domains = str(config.get("defaultDomains", "") or "")
+        domains = [
+            item.strip()
+            for item in re.split(r"[,，\s]+", raw_domains)
+            if item.strip()
+        ]
     return cloudmail_provider.create_mailbox(
         http_post,
         get_cloudmail_url(),
@@ -1767,14 +1786,14 @@ def get_moemail_expiry_ms():
     return value if value in allowed else moemail_provider.DEFAULT_EXPIRY_MS
 
 
-def moemail_get_email_and_token():
+def moemail_get_email_and_token(domain=""):
     # MoeMail owns its domain list. Do not reuse defaultDomains from another provider.
     return moemail_provider.create_mailbox(
         http_get,
         http_post,
         get_moemail_api_base(),
         get_moemail_api_key(),
-        domain=get_moemail_domain(),
+        domain=str(domain or "").strip() or get_moemail_domain(),
         expiry_time=get_moemail_expiry_ms(),
     )
 
@@ -1833,24 +1852,77 @@ def cloudmail_get_oai_code(
 
 
 def get_email_provider():
-    return config.get("email_provider", "cloudflare")
+    return str(config.get("email_provider", "cloudflare") or "cloudflare").strip().lower()
+
+
+def _managed_domain_for_provider(provider: str) -> str:
+    if provider not in _MANAGED_EMAIL_DOMAIN_PROVIDERS:
+        return ""
+    selection = _select_managed_email_domain(provider)
+    if not selection.get("configured"):
+        return ""
+    domain = str(selection.get("domain") or "").strip()
+    if domain:
+        return domain
+    label = _EMAIL_DOMAIN_PROVIDER_LABELS.get(provider, provider)
+    raise RuntimeError(
+        f"邮箱域名池没有可用的 {label} 域名，请在面板启用或重置域名"
+    )
+
+
+def _record_email_domain_accepted(email: str) -> str:
+    provider = get_email_provider()
+    if provider not in _MANAGED_EMAIL_DOMAIN_PROVIDERS:
+        return ""
+    try:
+        _record_managed_email_domain_result(provider, email, "accepted")
+    except Exception:
+        pass
+    return ""
+
+
+def _record_email_domain_rejected(email: str, message: str = "") -> str:
+    provider = get_email_provider()
+    if provider not in _MANAGED_EMAIL_DOMAIN_PROVIDERS:
+        return ""
+    try:
+        result = _record_managed_email_domain_result(
+            provider,
+            email,
+            "rejected",
+            message,
+        )
+    except Exception:
+        return ""
+    if not result.get("matched"):
+        return ""
+    count = result.get("consecutive_rejections", 0)
+    threshold = result.get("failure_threshold", 0)
+    if result.get("newly_blocked"):
+        return f"域名池已自动拉黑（连续拒绝 {count}/{threshold}）"
+    return f"域名池拒绝计数 {count}/{threshold}"
 
 
 def get_email_and_token(api_key=None):
     provider = get_email_provider()
+    managed_domain = _managed_domain_for_provider(provider)
     if provider == "yyds":
-        return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
+        return yyds_get_email_and_token(
+            api_key=api_key,
+            jwt=get_yyds_jwt(),
+            domain=managed_domain,
+        )
     if provider == "cloudmail":
-        return cloudmail_get_email_and_token()
+        return cloudmail_get_email_and_token(domain=managed_domain)
     if provider == "moemail":
-        return moemail_get_email_and_token()
+        return moemail_get_email_and_token(domain=managed_domain)
     if provider == "cloudflare":
         api_base = get_cloudflare_api_base()
         if not api_base:
             raise Exception("Cloudflare API Base 未配置")
         try:
             # cloudflare_temp_email 专用模式
-            return cloudflare_create_temp_address(api_base)
+            return cloudflare_create_temp_address(api_base, domain=managed_domain)
         except Exception as primary_exc:
             try:
                 return cloudflare_provider.create_mailbox_fallback(
@@ -1863,6 +1935,7 @@ def get_email_and_token(api_key=None):
                     api_key=api_key or get_cloudflare_api_key(),
                     auth_mode=get_cloudflare_auth_mode(),
                     custom_auth=get_cloudflare_custom_auth(),
+                    domain=managed_domain,
                 )
             except Exception:
                 raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
@@ -2543,6 +2616,8 @@ def _wire_runtime_modules():
     _rf.configure(
         get_email_and_token=get_email_and_token,
         get_oai_code=get_oai_code,
+        on_email_accepted=_record_email_domain_accepted,
+        on_email_domain_rejected=_record_email_domain_rejected,
         raise_if_cancelled=raise_if_cancelled,
         sleep_with_cancel=sleep_with_cancel,
         RegistrationCancelled=RegistrationCancelled,

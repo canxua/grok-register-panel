@@ -44,6 +44,11 @@ auth-files 热加载确认和公网 OpenAI 兼容请求。任一步失败只写�
 也兼容现有 AI Stack 的 `CLIPROXY_MANAGEMENT_KEY` / `CLIPROXY_API_KEY`；不要把真实值
 提交到 `config.json`。
 
+也可以在面板顶部打开“邮箱服务”，选择实际 provider 后填写、保存并测试连接。
+面板只返回密钥是否已配置，不会回显 API Key、JWT 或密码；密钥输入留空会保留
+原值，只有显式点“清除”并保存才会删除。连接测试使用当前表单内容但不会落盘。
+配置仍写入 `config.json`，原子更新并保持 `0600`，其它已有配置项不会被覆盖。
+
 代理池与 sticky 文件均属于凭据材料。运行权限脚本会将 `proxies*.txt`、
 `stickies*.txt`、缓存文件及 `.env.monitor` 收紧为 `0600`。
 
@@ -57,6 +62,11 @@ Web/CLI 服务器路径不依赖 Tkinter；`tkinter` 仅是本机桌面 GUI 模�
 面板“代理池”会把真实代理 URL 写入 `log/proxy_pool.json`，文件权限为 `0600`。
 导入后先完成探活；有面板池条目时 worker 只使用健康且启用的代理，全部异常或
 冷却时会停止对应任务。一个账号开始后，注册、SSO 与 OAuth 全程固定同一出口。
+
+面板“邮箱服务”里的“域名轮换 · 高级设置”会把域名、provider、拒绝计数和轮换规则写入
+`log/email_domain_pool.json`，文件权限为 `0600`。只有 xAI 明确拒绝邮箱域名时
+才累计并按阈值拉黑；邮箱 API、验证码或网络异常不会处罚域名。对应 provider
+池耗尽时 worker 会停止该任务，不会回退到已被停用或拉黑的旧域名配置。
 
 ## 3. 发布前检查
 
@@ -86,6 +96,8 @@ export CPA_AUTO_VERIFY=0
 # export PROXY_POOL_STATE_FILE="$PWD/log/proxy_pool.json"
 # export PROXY_NETWORK_COOLDOWN_SECONDS=90
 # export PROXY_RISK_COOLDOWN_SECONDS=1800
+# 可选：覆盖邮箱域名池状态位置
+# export EMAIL_DOMAIN_POOL_STATE_FILE="$PWD/log/email_domain_pool.json"
 
 .venv/bin/python -u webui/monitor.py
 ```
@@ -176,4 +188,5 @@ scripts/run_xvfb_batch.sh 10
 - 生产环境不要启用原始日志尾部。
 - 不要把 Token 写入 URL、命令行参数、仓库或 issue。
 - 代理池 API 不返回账号密码，但 `log/proxy_pool.json` 本身含真实凭据，备份与迁移时按密钥材料处理。
+- 邮箱域名池不保存邮箱账号密码，但 `log/email_domain_pool.json` 仍属于运行状态，迁移时保留 `0600` 权限。
 - 面板使用内置 HTTP 服务，适合单机、LAN 或 tailnet 运维，不替代互联网边界网关。

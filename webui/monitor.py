@@ -30,6 +30,19 @@ try:
         start_proxy_tests,
         update_proxy,
     )
+    from webui.email_domain_store import (
+        delete_domain,
+        import_domains,
+        read_email_domain_pool,
+        reset_domain,
+        update_domain,
+        update_settings as update_email_domain_settings,
+    )
+    from webui.email_provider_store import (
+        read_email_provider_config,
+        save_email_provider_config,
+        test_email_provider_config,
+    )
     from webui.process_utils import (
         find_managed_processes,
         terminate_managed_processes,
@@ -52,6 +65,19 @@ except ImportError:  # running as script from webui/
         read_proxy_pool,
         start_proxy_tests,
         update_proxy,
+    )
+    from email_domain_store import (  # type: ignore
+        delete_domain,
+        import_domains,
+        read_email_domain_pool,
+        reset_domain,
+        update_domain,
+        update_settings as update_email_domain_settings,
+    )
+    from email_provider_store import (  # type: ignore
+        read_email_provider_config,
+        save_email_provider_config,
+        test_email_provider_config,
     )
     from process_utils import (  # type: ignore
         find_managed_processes,
@@ -1339,6 +1365,168 @@ HTML = r"""<!DOCTYPE html>
   .proxy-toggle { width: 16px; height: 16px; min-height: 0; accent-color: var(--accent); }
   .proxy-empty { padding: 38px 18px !important; color: var(--muted); text-align: center; }
   .proxy-job { color: var(--muted); font-size: 11px; }
+  body.domain-view-open { overflow: hidden; }
+  body.domain-view-open #dashboard-view > :not(#domain-view) { display: none; }
+  .domain-view {
+    position: fixed;
+    inset: 68px 0 0;
+    z-index: 8;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .domain-view[hidden] { display: none; }
+  .domain-view-inner {
+    width: min(calc(100% - 64px), 1280px);
+    margin: 0 auto;
+    padding: 28px 0 48px;
+  }
+  .domain-view-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .domain-view-subtitle { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+  .mail-source-kicker {
+    margin-bottom: 5px;
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 760;
+    text-transform: uppercase;
+  }
+  .mail-provider-panel {
+    padding: 18px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-raised);
+  }
+  .mail-provider-toolbar {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) auto;
+    align-items: end;
+    gap: 18px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .mail-provider-toolbar .field { max-width: 520px; }
+  .mail-provider-status { display: flex; align-items: center; gap: 8px; min-height: 38px; }
+  .mail-provider-status-label { color: var(--muted); font-size: 11px; }
+  .mail-provider-fields {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px 16px;
+    padding: 18px 0;
+  }
+  .mail-provider-fields .field { min-width: 0; gap: 5px; }
+  .mail-provider-fields input,
+  .mail-provider-fields select { width: 100%; min-height: 40px; }
+  .mail-secret-wrap { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  .mail-secret-wrap button { min-width: 54px; min-height: 40px; padding-inline: 10px; font-size: 11px; }
+  .mail-secret-wrap.pending-clear input { border-color: var(--warn); }
+  .mail-secret-note { min-height: 14px; color: var(--muted); font-size: 10px; }
+  .mail-secret-note.warn { color: var(--warn); }
+  .mail-provider-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .mail-provider-actions .mail-provider-meta { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .mail-provider-result { min-height: 18px; margin-top: 10px; }
+  .domain-advanced { margin-top: 20px; border-top: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); }
+  .domain-advanced > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 52px;
+    padding: 10px 2px;
+    color: var(--text);
+    cursor: pointer;
+    list-style: none;
+  }
+  .domain-advanced > summary::-webkit-details-marker { display: none; }
+  .domain-advanced > summary::after { content: "+"; color: var(--accent); font-family: "Geist Mono", monospace; font-size: 18px; }
+  .domain-advanced[open] > summary::after { content: "-"; }
+  .domain-advanced-title { font-size: 13px; font-weight: 680; }
+  .domain-advanced-meta { color: var(--muted); font-size: 11px; font-weight: 450; }
+  .domain-advanced-body { padding: 4px 0 24px; }
+  .domain-advanced-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .domain-summary {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--border);
+    gap: 1px;
+  }
+  .domain-summary-item { min-width: 0; padding: 12px 14px; background: var(--surface); }
+  .domain-summary-label { color: var(--muted); font-size: 11px; }
+  .domain-summary-value { margin-top: 4px; font-family: "Geist Mono", monospace; font-size: 22px; line-height: 1; font-weight: 720; }
+  .domain-import {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr);
+    gap: 16px;
+    align-items: stretch;
+    margin-top: 14px;
+    padding: 16px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  #domain-input {
+    min-height: 126px;
+    font-family: "Geist Mono", monospace;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .domain-import-actions { display: flex; flex-direction: column; justify-content: space-between; gap: 12px; }
+  .domain-import-actions .button-group { justify-content: flex-start; }
+  .domain-format { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+  .domain-settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .domain-settings .field { gap: 4px; }
+  .domain-settings input, .domain-settings select { min-height: 34px; }
+  .domain-list-section { margin-top: 18px; }
+  .domain-list-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+  .domain-list-head h2 { margin: 0; font-size: 13px; }
+  .domain-table-wrap { overflow: auto; border: 1px solid var(--border); background: var(--surface-raised); }
+  .domain-table { min-width: 960px; table-layout: fixed; }
+  .domain-table th:nth-child(1) { width: 92px; }
+  .domain-table th:nth-child(2) { width: 230px; }
+  .domain-table th:nth-child(3) { width: 130px; }
+  .domain-table th:nth-child(4) { width: 150px; }
+  .domain-table th:nth-child(5) { width: 220px; }
+  .domain-table th:nth-child(6) { width: 72px; }
+  .domain-table th:nth-child(7) { width: 170px; }
+  .domain-name { overflow-wrap: anywhere; }
+  .domain-meta { margin-top: 3px; color: var(--muted); font-size: 10px; }
+  .domain-state {
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .domain-state.active { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); color: var(--ok); }
+  .domain-state.standby { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+  .domain-state.blocked { border-color: color-mix(in srgb, var(--fail) 55%, var(--border)); color: var(--fail); }
+  .domain-state.disabled { border-color: var(--border); color: var(--muted); }
+  .domain-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .domain-actions button { min-height: 30px; padding: 5px 9px; font-size: 11px; }
+  .domain-toggle { width: 16px; height: 16px; min-height: 0; accent-color: var(--accent); }
+  .domain-empty { padding: 38px 18px !important; color: var(--muted); text-align: center; }
+  .domain-job { color: var(--muted); font-size: 11px; }
   body.help-view-open { overflow: hidden; }
   body.help-view-open #dashboard-view > :not(#help-view) { display: none; }
   .help-view {
@@ -1480,6 +1668,7 @@ HTML = r"""<!DOCTYPE html>
     .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .three { grid-template-columns: minmax(0, 1fr); }
     .help-guide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mail-provider-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 760px) {
     .topbar { width: calc(100% - 32px); height: 60px; align-items: center; flex-direction: row; gap: 10px; }
@@ -1522,9 +1711,31 @@ HTML = r"""<!DOCTYPE html>
     .proxy-import-actions .button-group { justify-content: stretch; }
     .proxy-import-actions button { flex: 1 1 auto; }
     .proxy-list-head { align-items: flex-start; flex-direction: column; }
+    .domain-view { inset-block-start: 60px; }
+    .domain-view-inner { width: calc(100% - 24px); padding: 20px 0 34px; }
+    .domain-view-heading { align-items: flex-start; flex-direction: column; margin-bottom: 16px; padding-bottom: 16px; }
+    .mail-provider-panel { padding: 14px; }
+    .mail-provider-toolbar { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .mail-provider-toolbar .field { max-width: none; }
+    .mail-provider-fields { grid-template-columns: minmax(0, 1fr); }
+    .mail-provider-actions { align-items: stretch; flex-wrap: wrap; }
+    .mail-provider-actions button { flex: 1 1 0; }
+    .mail-provider-actions .mail-provider-meta { width: 100%; margin-left: 0; }
+    .domain-advanced-head { align-items: flex-start; flex-direction: column; }
+    .domain-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .domain-summary-item:last-child { grid-column: 1 / -1; }
+    .domain-import { grid-template-columns: minmax(0, 1fr); }
+    .domain-settings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .domain-import-actions .button-group { justify-content: stretch; }
+    .domain-import-actions button { flex: 1 1 auto; }
+    .domain-list-head { align-items: flex-start; flex-direction: column; }
   }
   @media (max-width: 420px) {
-    h1 { font-size: 15px; }
+    .topbar { gap: 6px; }
+    .brand { flex: 0 0 auto; }
+    h1 { font-size: 0; }
+    h1::before { content: "GR"; font-size: 15px; }
+    .status-cluster { min-width: 0; gap: 4px; }
     .badge { font-size: 11px; }
     .run-status { width: 30px; min-width: 30px; justify-content: center; padding-inline: 0; }
     #run-label { display: none; }
@@ -1535,12 +1746,20 @@ HTML = r"""<!DOCTYPE html>
     .metric .sub { font-size: 11px; }
     .button-group { justify-content: flex-start; }
     #run-status { display: none; }
-    button.view-switch { min-width: 58px; padding-inline: 7px; }
+    button.view-switch { min-width: 0; padding-inline: 6px; }
+    #domain-view-label, #proxy-view-label, #help-view-label { font-size: 0; }
+    #domain-view-label::after { content: "邮箱"; font-size: 11px; }
+    #proxy-view-label::after { content: "代理"; font-size: 11px; }
+    #help-view-label::after { content: "问题"; font-size: 11px; }
+    #domain-view-toggle[data-active="true"] #domain-view-label::after,
+    #proxy-view-toggle[data-active="true"] #proxy-view-label::after,
+    #help-view-toggle[data-active="true"] #help-view-label::after { content: "返回"; }
+    button.theme-option { padding-inline: 6px; }
+    .domain-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .domain-settings .field:first-child { grid-column: 1 / -1; }
   }
   @media (max-width: 340px) {
     .run-status { display: none; }
-    h1 { font-size: 0; }
-    h1::before { content: "GR"; font-size: 15px; }
   }
   html[data-theme="dark"] {
       color-scheme: dark;
@@ -1597,6 +1816,9 @@ HTML = r"""<!DOCTYPE html>
       <h1>GrokRegister</h1>
     </div>
     <div class="status-cluster">
+      <button type="button" class="view-switch" id="domain-view-toggle" aria-label="打开邮箱服务" title="邮箱服务" aria-controls="domain-view" aria-expanded="false" data-active="false" onclick="toggleDomainView()">
+        <span id="domain-view-label" aria-hidden="true">邮箱服务</span>
+      </button>
       <button type="button" class="view-switch" id="proxy-view-toggle" aria-label="打开代理池" title="代理池" aria-controls="proxy-view" aria-expanded="false" data-active="false" onclick="toggleProxyView()">
         <span id="proxy-view-label" aria-hidden="true">代理池</span>
       </button>
@@ -1628,7 +1850,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="control-grid">
       <div class="field field-token">
         <label for="monitor-token">访问令牌</label>
-        <input id="monitor-token" type="password" autocomplete="off" placeholder="MONITOR_TOKEN" onchange="getToken(); refresh(); refreshRecovery(); refreshProxies()" onblur="getToken()"/>
+        <input id="monitor-token" type="password" autocomplete="off" placeholder="MONITOR_TOKEN" onchange="getToken(); refresh(); refreshRecovery(); refreshProxies(); refreshEmailProvider(); refreshEmailDomains()" onblur="getToken()"/>
       </div>
       <div class="field field-mode">
         <label for="mode">运行模式</label>
@@ -1733,6 +1955,10 @@ HTML = r"""<!DOCTYPE html>
             <summary>邮箱 API 返回 401 或请求超时</summary>
             <div class="faq-answer">401 先检查对应邮箱服务的 key 和 <code>auth_mode</code>。访问 workers.dev 超时时，在配置中显式填写代理，不要只依赖桌面进程可能无法继承的 HTTP_PROXY 环境变量。</div>
           </details>
+          <details class="faq-item" data-faq-item data-search="邮箱服务 provider cloudflare duckmail yyds mailnest cloudmail moemail api 测试 域名轮换">
+            <summary>如何配置邮箱服务</summary>
+            <div class="faq-answer">打开顶部“邮箱服务”，选择当前使用的服务商后填写对应 API 配置，保存并测试连通性。自有域名轮换位于同页高级设置；只有 xAI 明确拒绝域名才累计，邮箱 API 和验证码异常不会处罚域名。</div>
+          </details>
           <details class="faq-item" data-faq-item data-search="黑名单 asn 清除 重置 baseline 风控 出口">
             <summary>黑名单有什么作用，可以清除吗</summary>
             <div class="faq-answer">黑名单用于避开持续触发风控的出口 ASN。面板“重置”会恢复基线熔断规则；不清楚影响时不要清空全部规则，重复命中通常说明出口质量需要调整。</div>
@@ -1804,6 +2030,114 @@ HTML = r"""<!DOCTYPE html>
           </table>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="domain-view" id="domain-view" aria-labelledby="domain-view-title" hidden>
+    <div class="domain-view-inner">
+      <div class="domain-view-heading">
+        <div>
+          <div class="mail-source-kicker">Mail source</div>
+          <div class="page-title" id="domain-view-title">邮箱服务</div>
+          <p class="domain-view-subtitle" id="mail-provider-subtitle">读取当前邮箱服务配置</p>
+        </div>
+        <span class="domain-job" id="mail-provider-heading-label">--</span>
+      </div>
+
+      <section class="mail-provider-panel" aria-labelledby="mail-provider-label">
+        <div class="mail-provider-toolbar">
+          <div class="field">
+            <label for="mail-provider-select" id="mail-provider-label">邮箱提供商</label>
+            <select id="mail-provider-select" onchange="selectEmailProvider(this.value)">
+              <option value="">正在读取</option>
+            </select>
+          </div>
+          <div class="mail-provider-status">
+            <span class="mail-provider-status-label">当前状态</span>
+            <span class="badge" id="mail-provider-status" role="status" aria-live="polite">读取中</span>
+          </div>
+        </div>
+        <div class="mail-provider-fields" id="mail-provider-fields" aria-live="polite">
+          <div class="field"><label>服务配置</label><input disabled value="正在读取"/></div>
+        </div>
+        <div class="mail-provider-actions">
+          <button class="primary" id="mail-provider-save" onclick="saveEmailProviderConfig()">保存配置</button>
+          <button id="mail-provider-test" onclick="testEmailProviderConnection()">测试当前提供商</button>
+          <span class="mail-provider-meta mono" id="mail-provider-updated">尚未读取</span>
+        </div>
+        <div class="msg mail-provider-result" id="mail-provider-msg" role="status" aria-live="polite"></div>
+      </section>
+
+      <details class="domain-advanced" id="domain-advanced">
+        <summary>
+          <span class="domain-advanced-title">域名轮换 <span class="domain-advanced-meta">高级设置</span></span>
+          <span class="domain-advanced-meta mono" id="domain-advanced-count">0 个域名</span>
+        </summary>
+        <div class="domain-advanced-body">
+          <div class="domain-advanced-head">
+            <span class="domain-advanced-meta">仅 xAI 明确拒绝域名时累计失败</span>
+            <span class="domain-job mono" id="domain-updated">等待读取</span>
+          </div>
+
+          <div class="domain-summary" id="domain-summary" aria-label="邮箱域名轮换状态">
+            <div class="domain-summary-item"><div class="domain-summary-label">总数</div><div class="domain-summary-value">--</div></div>
+            <div class="domain-summary-item"><div class="domain-summary-label">轮换中</div><div class="domain-summary-value">--</div></div>
+            <div class="domain-summary-item"><div class="domain-summary-label">待命</div><div class="domain-summary-value">--</div></div>
+            <div class="domain-summary-item"><div class="domain-summary-label">已拉黑</div><div class="domain-summary-value">--</div></div>
+            <div class="domain-summary-item"><div class="domain-summary-label">已停用</div><div class="domain-summary-value">--</div></div>
+          </div>
+
+          <div class="domain-import">
+            <div class="field">
+              <label for="domain-input">域名或子域名（每行一条）</label>
+              <textarea id="domain-input" spellcheck="false" autocomplete="off" placeholder="mail.example.com&#10;inbox.example.net"></textarea>
+            </div>
+            <div class="domain-import-actions">
+              <div class="domain-settings">
+                <div class="field">
+                  <label for="domain-provider">邮箱服务商</label>
+                  <select id="domain-provider">
+                    <option value="cloudflare">Cloudflare</option>
+                    <option value="cloudmail">CloudMail</option>
+                    <option value="moemail">MoeMail</option>
+                    <option value="yyds">YYDS</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="domain-threshold">拒绝阈值</label>
+                  <input type="number" id="domain-threshold" min="1" max="20" value="3"/>
+                </div>
+                <div class="field">
+                  <label for="domain-max-active">每个服务商活跃数</label>
+                  <input type="number" id="domain-max-active" min="0" max="100" value="0" title="0 表示不限"/>
+                </div>
+              </div>
+              <p class="domain-format">Cloudflare、CloudMail、MoeMail 与 YYDS 可绑定自有域名；0 表示不限制活跃数。</p>
+              <div class="button-group">
+                <button class="primary" id="domain-import-button" onclick="importDomainInput()">导入域名</button>
+                <button id="domain-settings-button" onclick="saveDomainSettings()">保存规则</button>
+              </div>
+            </div>
+          </div>
+          <div class="msg" id="domain-msg" role="status" aria-live="polite"></div>
+
+          <div class="domain-list-section">
+            <div class="domain-list-head">
+              <div>
+                <h2>域名明细</h2>
+                <div class="domain-job mono" id="domain-status" role="status" aria-live="polite">未导入域名</div>
+              </div>
+              <button id="domain-refresh-button" onclick="refreshEmailDomains(false)">刷新</button>
+            </div>
+            <div class="domain-table-wrap">
+              <table class="domain-table">
+                <thead><tr><th>状态</th><th>域名</th><th>服务商</th><th>拒绝次数</th><th>最近状态</th><th>启用</th><th>操作</th></tr></thead>
+                <tbody id="domain-body"><tr><td colspan="7" class="domain-empty">正在读取邮箱域名轮换</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -1902,6 +2236,10 @@ HTML = r"""<!DOCTYPE html>
 <script>
 let last = null;
 let proxyData = null;
+let domainData = null;
+let emailProviderData = null;
+let selectedEmailProvider = "";
+const clearedEmailSecrets = new Set();
 const THEME_KEY = "GROK_REGISTER_THEME";
 const APP_VIEW_KEY = "GROK_REGISTER_APP_VIEW";
 const HELP_TAB_KEY = "GROK_REGISTER_HELP_TAB";
@@ -1920,19 +2258,23 @@ function setTheme(theme) {
   syncThemeButtons();
 }
 function setAppView(view, options = {}) {
-  if (view !== "dashboard" && view !== "help" && view !== "proxies") return;
+  if (view !== "dashboard" && view !== "help" && view !== "proxies" && view !== "domains") return;
   const dashboard = document.getElementById("dashboard-view");
   const help = document.getElementById("help-view");
   const proxies = document.getElementById("proxy-view");
+  const domains = document.getElementById("domain-view");
+  const domainToggle = document.getElementById("domain-view-toggle");
+  const domainLabel = document.getElementById("domain-view-label");
   const toggle = document.getElementById("help-view-toggle");
   const label = document.getElementById("help-view-label");
   const proxyToggle = document.getElementById("proxy-view-toggle");
   const proxyLabel = document.getElementById("proxy-view-label");
-  if (!dashboard || !help || !proxies || !toggle || !label || !proxyToggle || !proxyLabel) return;
+  if (!dashboard || !help || !proxies || !domains || !domainToggle || !domainLabel || !toggle || !label || !proxyToggle || !proxyLabel) return;
   const isHelp = view === "help";
   const isProxies = view === "proxies";
-  const isOverlay = isHelp || isProxies;
-  const dashboardChildren = Array.from(dashboard.children).filter(element => element !== help && element !== proxies);
+  const isDomains = view === "domains";
+  const isOverlay = isHelp || isProxies || isDomains;
+  const dashboardChildren = Array.from(dashboard.children).filter(element => element !== help && element !== proxies && element !== domains);
   dashboardChildren.forEach(element => {
     element.inert = isOverlay;
     if (isOverlay) element.setAttribute("aria-hidden", "true");
@@ -1942,8 +2284,11 @@ function setAppView(view, options = {}) {
   help.inert = !isHelp;
   proxies.hidden = !isProxies;
   proxies.inert = !isProxies;
+  domains.hidden = !isDomains;
+  domains.inert = !isDomains;
   document.body.classList.toggle("help-view-open", isHelp);
   document.body.classList.toggle("proxy-view-open", isProxies);
+  document.body.classList.toggle("domain-view-open", isDomains);
   toggle.dataset.active = String(isHelp);
   toggle.setAttribute("aria-expanded", String(isHelp));
   toggle.setAttribute("aria-label", isHelp ? "返回控制台" : "打开问题和使用");
@@ -1954,15 +2299,24 @@ function setAppView(view, options = {}) {
   proxyToggle.setAttribute("aria-label", isProxies ? "返回控制台" : "打开代理池");
   proxyToggle.title = isProxies ? "返回控制台" : "代理池";
   proxyLabel.textContent = isProxies ? "返回控制台" : "代理池";
+  domainToggle.dataset.active = String(isDomains);
+  domainToggle.setAttribute("aria-expanded", String(isDomains));
+  domainToggle.setAttribute("aria-label", isDomains ? "返回控制台" : "打开邮箱服务");
+  domainToggle.title = isDomains ? "返回控制台" : "邮箱服务";
+  domainLabel.textContent = isDomains ? "返回控制台" : "邮箱服务";
   if (options.persist !== false) {
     try { localStorage.setItem(APP_VIEW_KEY, view); } catch (e) {}
   }
   if (isProxies) refreshProxies();
+  if (isDomains) {
+    refreshEmailProvider();
+    refreshEmailDomains();
+  }
   if (options.focus) {
     requestAnimationFrame(() => {
       const target = isHelp
         ? document.querySelector('[data-help-tab][aria-selected="true"]')
-        : (isProxies ? document.getElementById("proxy-input") : (view === "dashboard" ? proxyToggle : toggle));
+        : (isProxies ? document.getElementById("proxy-input") : (isDomains ? document.getElementById("mail-provider-select") : (view === "dashboard" ? domainToggle : toggle)));
       if (target) target.focus();
     });
   }
@@ -1974,6 +2328,10 @@ function toggleAppView() {
 function toggleProxyView() {
   const isProxies = document.body.classList.contains("proxy-view-open");
   setAppView(isProxies ? "dashboard" : "proxies", { focus: true });
+}
+function toggleDomainView() {
+  const isDomains = document.body.classList.contains("domain-view-open");
+  setAppView(isDomains ? "dashboard" : "domains", { focus: true });
 }
 function setHelpTab(name) {
   if (name !== "guide" && name !== "faq") return;
@@ -2029,13 +2387,13 @@ function initHelp() {
     view = localStorage.getItem(APP_VIEW_KEY) || "dashboard";
     tab = localStorage.getItem(HELP_TAB_KEY) || "guide";
   } catch (e) {}
-  if (!["dashboard", "help", "proxies"].includes(view)) view = "dashboard";
+  if (!["dashboard", "help", "proxies", "domains"].includes(view)) view = "dashboard";
   setHelpTab(tab);
   filterFaq("");
   setAppView(view, { persist: false, focus: false });
 }
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && (document.body.classList.contains("help-view-open") || document.body.classList.contains("proxy-view-open"))) {
+  if (event.key === "Escape" && (document.body.classList.contains("help-view-open") || document.body.classList.contains("proxy-view-open") || document.body.classList.contains("domain-view-open"))) {
     setAppView("dashboard", { focus: true });
   }
 });
@@ -2075,7 +2433,7 @@ async function api(path, opts) {
       if (authHelp) showHelpFor("令牌");
       throw new Error("访问令牌不匹配，请重新输入当前面板令牌");
     }
-    throw new Error(j.error || r.statusText || "request failed");
+    throw new Error(j.error || j.detail || r.statusText || "request failed");
   }
   if (j && j.ok === false) throw new Error(j.error || j.message || "request failed");
   return j;
@@ -2222,6 +2580,264 @@ async function deleteProxyItem(id) {
     renderProxyPool(result);
     setMsg("proxy-msg", "代理已删除", "ok");
   } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+}
+function currentEmailProviderDefinition(provider = selectedEmailProvider) {
+  return (emailProviderData && emailProviderData.providers || []).find(item => item.id === provider) || null;
+}
+function emailProviderFieldControl(field) {
+  const id = "mail-field-" + field.name;
+  const raw = emailProviderData && emailProviderData.values ? emailProviderData.values[field.name] : "";
+  const value = raw ?? field.default ?? "";
+  if (field.type === "select") {
+    const options = (field.options || []).map(option => {
+      const optionValue = typeof option === "object" ? option.value : option;
+      const optionLabel = typeof option === "object" ? option.label : option;
+      return `<option value="${esc(optionValue)}" ${String(optionValue) === String(value) ? "selected" : ""}>${esc(optionLabel)}</option>`;
+    }).join("");
+    return `<select id="${esc(id)}" data-mail-field="${esc(field.name)}">${options}</select>`;
+  }
+  const isSecret = field.secret === true;
+  const configured = isSecret && emailProviderData && emailProviderData.secret_configured && emailProviderData.secret_configured[field.name];
+  const placeholder = configured ? "已配置，留空保留" : (field.placeholder || "");
+  const type = isSecret ? "password" : (["url", "email"].includes(field.type) ? field.type : "text");
+  const input = `<input id="${esc(id)}" data-mail-field="${esc(field.name)}" type="${type}" value="${isSecret ? "" : esc(value)}" placeholder="${esc(placeholder)}" autocomplete="${isSecret ? "new-password" : "off"}" spellcheck="false" ${isSecret ? `oninput="emailProviderSecretInput('${field.name}')"` : ""}/>`;
+  if (!isSecret) return input;
+  const clear = configured ? `<button type="button" data-mail-secret-button="${esc(field.name)}" onclick="toggleEmailProviderSecret('${field.name}')">清除</button>` : "";
+  const note = configured ? "已保存密钥" : "尚未配置";
+  return `<div class="mail-secret-wrap" data-mail-secret-wrap="${esc(field.name)}">${input}${clear}</div><div class="mail-secret-note" data-mail-secret-note="${esc(field.name)}">${note}</div>`;
+}
+function renderEmailProviderFields(provider) {
+  const definition = currentEmailProviderDefinition(provider);
+  if (!definition) return;
+  selectedEmailProvider = definition.id;
+  clearedEmailSecrets.clear();
+  const select = document.getElementById("mail-provider-select");
+  if (select) select.value = definition.id;
+  document.getElementById("mail-provider-heading-label").textContent = definition.label;
+  const persisted = emailProviderData && emailProviderData.provider === definition.id;
+  document.getElementById("mail-provider-subtitle").textContent = persisted
+    ? ("当前注册任务使用 " + definition.label)
+    : ("待切换到 " + definition.label);
+  const status = document.getElementById("mail-provider-status");
+  status.textContent = definition.configured ? "已配置" : "待配置";
+  status.className = "badge " + (definition.configured ? "ok" : "warn");
+  document.getElementById("mail-provider-fields").innerHTML = (definition.fields || []).map(field =>
+    `<div class="field"><label for="mail-field-${esc(field.name)}">${esc(field.label)}</label>${emailProviderFieldControl(field)}</div>`
+  ).join("") || '<div class="field"><label>服务配置</label><input disabled value="该服务商没有可编辑字段"/></div>';
+  const domainProvider = document.getElementById("domain-provider");
+  if (domainProvider && ["cloudflare", "cloudmail", "moemail", "yyds"].includes(definition.id)) {
+    domainProvider.value = definition.id;
+    if (domainData) renderEmailDomainPool(domainData);
+  }
+}
+function renderEmailProviderConfig(data) {
+  emailProviderData = data || {};
+  const select = document.getElementById("mail-provider-select");
+  const providers = emailProviderData.providers || [];
+  select.innerHTML = providers.map(provider =>
+    `<option value="${esc(provider.id)}">${esc(provider.label)}</option>`
+  ).join("");
+  const provider = providers.some(item => item.id === emailProviderData.provider)
+    ? emailProviderData.provider
+    : (providers[0] && providers[0].id || "");
+  const updated = emailProviderData.mtime ? new Date(emailProviderData.mtime * 1000) : null;
+  document.getElementById("mail-provider-updated").textContent = updated && !Number.isNaN(updated.getTime())
+    ? ("config.json " + updated.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }))
+    : "config.json 尚未创建";
+  renderEmailProviderFields(provider);
+}
+function selectEmailProvider(provider) {
+  renderEmailProviderFields(provider);
+  setMsg("mail-provider-msg", "", "");
+}
+function toggleEmailProviderSecret(name) {
+  const clearing = !clearedEmailSecrets.has(name);
+  if (clearing) clearedEmailSecrets.add(name);
+  else clearedEmailSecrets.delete(name);
+  const wrap = document.querySelector(`[data-mail-secret-wrap="${name}"]`);
+  const button = document.querySelector(`[data-mail-secret-button="${name}"]`);
+  const note = document.querySelector(`[data-mail-secret-note="${name}"]`);
+  if (wrap) wrap.classList.toggle("pending-clear", clearing);
+  if (button) button.textContent = clearing ? "撤销" : "清除";
+  if (note) {
+    note.textContent = clearing ? "保存后清除密钥" : "已保存密钥";
+    note.className = "mail-secret-note" + (clearing ? " warn" : "");
+  }
+}
+function emailProviderSecretInput(name) {
+  const input = document.getElementById("mail-field-" + name);
+  if (input && input.value && clearedEmailSecrets.has(name)) toggleEmailProviderSecret(name);
+}
+function collectEmailProviderSettings() {
+  const definition = currentEmailProviderDefinition();
+  const settings = {};
+  (definition && definition.fields || []).forEach(field => {
+    const input = document.getElementById("mail-field-" + field.name);
+    if (!input) return;
+    settings[field.name] = field.name === "moemail_expiry_ms" ? Number(input.value) : input.value;
+  });
+  return settings;
+}
+async function refreshEmailProvider(authHelp = false) {
+  try {
+    const data = await api("/api/email-provider?_=" + Date.now(), { authHelp });
+    renderEmailProviderConfig(data);
+    if (!data.ok && data.error) setMsg("mail-provider-msg", data.error, "err");
+  } catch (e) {
+    const message = String(e.message || e);
+    document.getElementById("mail-provider-heading-label").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+    setMsg("mail-provider-msg", message, "err");
+  }
+}
+async function saveEmailProviderConfig() {
+  const button = document.getElementById("mail-provider-save");
+  button.disabled = true;
+  setMsg("mail-provider-msg", "正在保存…", "");
+  try {
+    const result = await api("/api/email-provider", { method: "POST", body: JSON.stringify({
+      provider: selectedEmailProvider,
+      settings: collectEmailProviderSettings(),
+      clear_secrets: Array.from(clearedEmailSecrets),
+    }) });
+    renderEmailProviderConfig(result);
+    setMsg("mail-provider-msg", result.provider_label + " 配置已保存", "ok");
+  } catch (e) { setMsg("mail-provider-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+async function testEmailProviderConnection() {
+  const button = document.getElementById("mail-provider-test");
+  button.disabled = true;
+  setMsg("mail-provider-msg", "正在测试连通性…", "");
+  try {
+    const result = await api("/api/email-provider/test", { method: "POST", body: JSON.stringify({
+      provider: selectedEmailProvider,
+      settings: collectEmailProviderSettings(),
+      clear_secrets: Array.from(clearedEmailSecrets),
+    }) });
+    setMsg("mail-provider-msg", result.detail || "连接正常", "ok");
+  } catch (e) { setMsg("mail-provider-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+function domainStatusLabel(status) {
+  return ({ active: "轮换中", standby: "待命", blocked: "已拉黑", disabled: "已停用" })[status] || "待命";
+}
+function renderEmailDomainPool(data) {
+  domainData = data || {};
+  const summary = domainData.summary || {};
+  const values = [
+    ["总数", summary.total ?? 0, ""],
+    ["轮换中", summary.active ?? 0, "ok"],
+    ["待命", summary.standby ?? 0, (summary.standby || 0) > 0 ? "accent" : ""],
+    ["已拉黑", summary.blocked ?? 0, (summary.blocked || 0) > 0 ? "fail" : ""],
+    ["已停用", summary.disabled ?? 0, (summary.disabled || 0) > 0 ? "warn" : ""],
+  ];
+  document.getElementById("domain-summary").innerHTML = values.map(([label, value, cls]) =>
+    `<div class="domain-summary-item"><div class="domain-summary-label">${esc(label)}</div><div class="domain-summary-value ${cls}">${esc(value)}</div></div>`
+  ).join("");
+  document.getElementById("domain-advanced-count").textContent = (summary.total ?? 0) + " 个域名";
+  document.getElementById("domain-updated").textContent = domainData.updated_at ? ("更新 " + proxyTime(domainData.updated_at)) : "尚未写入";
+  const settings = domainData.settings || {};
+  const focused = document.activeElement && ["domain-threshold", "domain-max-active"].includes(document.activeElement.id);
+  if (!focused) {
+    document.getElementById("domain-threshold").value = settings.failure_threshold ?? 3;
+    document.getElementById("domain-max-active").value = settings.max_active_domains ?? 0;
+  }
+  const provider = document.getElementById("domain-provider").value || "cloudflare";
+  const providerLabel = domainData.provider_labels && domainData.provider_labels[provider] || provider;
+  const providerCount = domainData.providers && domainData.providers[provider] || 0;
+  document.getElementById("domain-status").textContent = providerCount
+    ? (providerLabel + " 已配置 " + providerCount + " 个域名")
+    : "尚未导入当前服务商域名";
+  const items = domainData.items || [];
+  document.getElementById("domain-body").innerHTML = items.length ? items.map(item => {
+    const status = item.status || "standby";
+    const stateClass = ["active", "standby", "blocked", "disabled"].includes(status) ? status : "standby";
+    const threshold = item.failure_threshold || settings.failure_threshold || 3;
+    const rejected = Number(item.consecutive_rejections || 0);
+    const total = Number(item.total_rejections || 0);
+    const counts = `${rejected}/${threshold}<div class="domain-meta">累计 ${total} / 成功 ${Number(item.success_count || 0)}</div>`;
+    const latest = item.last_error || (item.last_rejected_at ? ("拒绝 " + proxyTime(item.last_rejected_at)) : (item.last_success_at ? ("接受 " + proxyTime(item.last_success_at)) : "暂无结果"));
+    const resetButton = rejected > 0 || status === "blocked" ? `<button onclick="resetEmailDomain('${item.id}')">重置</button>` : "";
+    return `<tr>
+      <td><span class="domain-state ${stateClass}">${esc(domainStatusLabel(status))}</span></td>
+      <td><div class="mono domain-name">${esc(item.domain)}</div><div class="domain-meta">${esc(item.source || "panel")}</div></td>
+      <td>${esc(item.provider_label || item.provider || "")}</td>
+      <td class="mono">${counts}</td>
+      <td title="${esc(item.last_error || "")}">${esc(latest)}</td>
+      <td><input class="domain-toggle" type="checkbox" aria-label="启用 ${esc(item.domain)}" ${item.enabled ? "checked" : ""} onchange="setEmailDomainEnabled('${item.id}', this.checked)"/></td>
+      <td><div class="domain-actions">${resetButton}<button class="danger" onclick="deleteEmailDomain('${item.id}')">删除</button></div></td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="7" class="domain-empty">域名池为空，可在上方导入自有域名或子域名</td></tr>';
+}
+async function refreshEmailDomains(authHelp = false) {
+  try {
+    const data = await api("/api/email-domains?_=" + Date.now(), { authHelp });
+    renderEmailDomainPool(data);
+    if (!data.ok && data.error) setMsg("domain-msg", data.error, "err");
+  } catch (e) {
+    const message = String(e.message || e);
+    document.getElementById("domain-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+    setMsg("domain-msg", message, "err");
+  }
+}
+function domainImportMessage(result) {
+  const errors = result.errors || [];
+  const errorText = errors.length ? ("，跳过 " + errors.length + " 条：" + errors.slice(0, 2).map(item => "第 " + item.line + " 行 " + item.error).join("；")) : "";
+  return "已导入 " + (result.imported_count || 0) + " 个域名，重复 " + (result.duplicate_count || 0) + " 个" + errorText;
+}
+async function importDomainInput() {
+  const input = document.getElementById("domain-input");
+  const button = document.getElementById("domain-import-button");
+  const value = (input.value || "").trim();
+  if (!value) { setMsg("domain-msg", "请输入至少一个域名", "err"); input.focus(); return; }
+  button.disabled = true;
+  setMsg("domain-msg", "正在导入…", "");
+  try {
+    const result = await api("/api/email-domains/import", { method: "POST", body: JSON.stringify({ domains: value, provider: document.getElementById("domain-provider").value }) });
+    renderEmailDomainPool(result);
+    input.value = "";
+    setMsg("domain-msg", domainImportMessage(result), result.errors && result.errors.length ? "" : "ok");
+  } catch (e) { setMsg("domain-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+async function saveDomainSettings() {
+  const button = document.getElementById("domain-settings-button");
+  button.disabled = true;
+  try {
+    const result = await api("/api/email-domains/settings", { method: "POST", body: JSON.stringify({
+      failure_threshold: Number(document.getElementById("domain-threshold").value || 3),
+      max_active_domains: Number(document.getElementById("domain-max-active").value || 0),
+    }) });
+    renderEmailDomainPool(result);
+    setMsg("domain-msg", "域名池规则已保存", "ok");
+  } catch (e) { setMsg("domain-msg", String(e.message || e), "err"); }
+  button.disabled = false;
+}
+async function setEmailDomainEnabled(id, enabled) {
+  try {
+    const result = await api("/api/email-domains/" + id, { method: "PATCH", body: JSON.stringify({ enabled }) });
+    renderEmailDomainPool(result);
+    setMsg("domain-msg", enabled ? "域名已启用" : "域名已停用", "ok");
+  } catch (e) {
+    setMsg("domain-msg", String(e.message || e), "err");
+    await refreshEmailDomains(false);
+  }
+}
+async function resetEmailDomain(id) {
+  try {
+    const result = await api("/api/email-domains/reset", { method: "POST", body: JSON.stringify({ id }) });
+    renderEmailDomainPool(result);
+    setMsg("domain-msg", "域名失败计数已重置", "ok");
+  } catch (e) { setMsg("domain-msg", String(e.message || e), "err"); }
+}
+async function deleteEmailDomain(id) {
+  const item = (domainData && domainData.items || []).find(value => value.id === id);
+  if (!confirm("删除域名 " + (item ? item.domain : "") + "？")) return;
+  try {
+    const result = await api("/api/email-domains/" + id, { method: "DELETE" });
+    renderEmailDomainPool(result);
+    setMsg("domain-msg", "域名已删除", "ok");
+  } catch (e) { setMsg("domain-msg", String(e.message || e), "err"); }
 }
 async function refresh() {
   try {
@@ -2506,6 +3122,7 @@ refreshRecovery();
 setInterval(refreshRecovery, 5000);
 setInterval(() => {
   if (document.body.classList.contains("proxy-view-open")) refreshProxies(false);
+  if (document.body.classList.contains("domain-view-open")) refreshEmailDomains(false);
 }, 3000);
 </script>
 </body>
@@ -2617,7 +3234,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             self._json(200, {"ok": True})
             return
-        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies"):
+        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains"):
             if not self._require_read():
                 return
         if u.path == "/api/status":
@@ -2652,6 +3269,18 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/proxies":
             try:
                 self._json(200, read_proxy_pool())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-provider":
+            try:
+                self._json(200, read_email_provider_config())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-domains":
+            try:
+                self._json(200, read_email_domain_pool())
             except Exception as e:
                 self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
@@ -2731,6 +3360,62 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json(400, {"ok": False, "error": redact_log_line(str(e))})
             return
+        if u.path == "/api/email-provider":
+            try:
+                result = save_email_provider_config(
+                    body.get("provider"),
+                    body.get("settings") or {},
+                    clear_secrets=body.get("clear_secrets"),
+                )
+                self._json(200, result)
+            except ValueError as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-provider/test":
+            try:
+                result = test_email_provider_config(
+                    body.get("provider"),
+                    body.get("settings") or {},
+                    clear_secrets=body.get("clear_secrets"),
+                )
+                self._json(200 if result.get("ok") else 424, result)
+            except ValueError as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-domains/import":
+            try:
+                result = import_domains(
+                    body.get("domains"),
+                    body.get("provider"),
+                    source="panel",
+                )
+                self._json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-domains/settings":
+            try:
+                result = update_email_domain_settings(
+                    failure_threshold=body.get("failure_threshold"),
+                    max_active_domains=body.get("max_active_domains"),
+                )
+                self._json(200, result)
+            except ValueError as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/email-domains/reset":
+            try:
+                result = reset_domain(body.get("id"))
+                self._json(200 if result.get("ok", True) else 404, result)
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
         if u.path == "/api/blacklist/refresh":
             try:
                 bl = read_blacklist()
@@ -2766,8 +3451,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):
         u = urlparse(self.path)
-        match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
-        if match is None:
+        proxy_match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
+        domain_match = re.fullmatch(r"/api/email-domains/([a-f0-9]{20})", u.path)
+        if proxy_match is None and domain_match is None:
             self._send(404, b"not found", "text/plain")
             return
         if not self._require_write():
@@ -2781,7 +3467,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": str(exc)})
             return
         try:
-            result = update_proxy(match.group(1), enabled=body.get("enabled"))
+            if proxy_match is not None:
+                result = update_proxy(proxy_match.group(1), enabled=body.get("enabled"))
+            else:
+                result = update_domain(domain_match.group(1), enabled=body.get("enabled"))
             self._json(200 if result.get("ok") else 404, result)
         except ValueError as exc:
             self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
@@ -2790,14 +3479,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         u = urlparse(self.path)
-        match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
-        if match is None:
+        proxy_match = re.fullmatch(r"/api/proxies/([a-f0-9]{20})", u.path)
+        domain_match = re.fullmatch(r"/api/email-domains/([a-f0-9]{20})", u.path)
+        if proxy_match is None and domain_match is None:
             self._send(404, b"not found", "text/plain")
             return
         if not self._require_write():
             return
         try:
-            result = delete_proxy(match.group(1))
+            result = (
+                delete_proxy(proxy_match.group(1))
+                if proxy_match is not None
+                else delete_domain(domain_match.group(1))
+            )
             self._json(200 if result.get("ok") else 404, result)
         except Exception as exc:
             self._json(500, {"ok": False, "error": redact_log_line(str(exc))})

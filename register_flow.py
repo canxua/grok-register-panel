@@ -651,7 +651,25 @@ return '';
 def raise_if_email_domain_rejected(email=""):
     message = detect_email_domain_rejection(email)
     if message:
+        callback = _deps.get("on_email_domain_rejected")
+        if callback:
+            try:
+                note = str(callback(email, message) or "").strip()
+                if note:
+                    message = f"{message} | {note}"
+            except Exception:
+                pass
         raise _deps['EmailDomainRejected'](email=email, message=message)
+
+
+def _notify_email_accepted(email=""):
+    callback = _deps.get("on_email_accepted")
+    if not callback:
+        return
+    try:
+        callback(email)
+    except Exception:
+        pass
 
 
 def _email_page_advanced_once(email):
@@ -1062,6 +1080,7 @@ return 'enter';
                 if log_callback:
                     detail = f" ({clicked})" if isinstance(clicked, str) else ""
                     log_callback(f"[*] 已填写邮箱并提交: {email}{detail}")
+                _notify_email_accepted(email)
                 return email, dev_token
             if log_callback and time.time() - last_diag_time >= 5:
                 last_diag_time = time.time()
@@ -1096,6 +1115,7 @@ return false;
                         if clicked and _wait_email_page_advanced(email, wait=5.0, cancel_callback=cancel_callback):
                             if log_callback:
                                 log_callback(f"[*] 已填写邮箱并提交: {email} (recovery)")
+                            _notify_email_accepted(email)
                             return email, dev_token
                     sleep_with_cancel(0.5, cancel_callback)
         except Exception as rec_exc:

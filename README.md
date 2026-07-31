@@ -31,6 +31,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
 | **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率和账号补录；操作 API 需 `MONITOR_TOKEN` |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
+| 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
@@ -145,6 +146,8 @@ cp config.example.json config.json
 | `PROXY_POOL_STATE_FILE` | `./log/proxy_pool.json` | 外部代理池凭据、健康与冷却状态，文件权限 `0600` |
 | `PROXY_NETWORK_COOLDOWN_SECONDS` | `90` | 运行时网络异常的短冷却秒数 |
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
+| `EMAIL_PROVIDER_CONFIG_FILE` | `./config.json` | 面板邮箱服务配置文件；保存时保持 `0600` |
+| `EMAIL_DOMAIN_POOL_STATE_FILE` | `./log/email_domain_pool.json` | 邮箱域名池状态与规则，文件权限 `0600` |
 
 生成 token 示例：
 
@@ -173,6 +176,8 @@ python webui/monitor.py
 2. 填入与 `MONITOR_TOKEN` **相同**的字符串（自动写入 `localStorage`）  
 3. 设模式 / workers / batch 数量 / 再跑 N / 风控满 N → **启动**
 4. 需要多出口时打开顶部 **代理池**，导入代理并等待检测完成
+5. 打开顶部 **邮箱服务**，选择 provider、填写对应参数，保存后执行一次连接测试
+6. 需要多个自有收信域名轮换时，再展开 **域名轮换 · 高级设置** 导入域名并保存规则
 
 也可在控制台手动写入：
 
@@ -232,9 +237,9 @@ python grok_register_ttk.py
 | 接口 | 鉴权 |
 |------|------|
 | `GET /` · `GET /api/health` | 可匿名；不返回运行数据 |
-| `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` · `/api/proxies` | 配置了 Token 后必须鉴权 |
-| `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` · `/api/proxies/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
-| `PATCH /api/proxies/{id}` · `DELETE /api/proxies/{id}` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
+| `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` · `/api/proxies` · `/api/email-domains` | 配置了 Token 后必须鉴权 |
+| `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` · `/api/proxies/*` · `/api/email-domains/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
+| `PATCH /api/proxies/{id}` · `DELETE /api/proxies/{id}` · `PATCH/DELETE /api/email-domains/{id}` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
 
 前端 `api()` 会从 Token 输入框 / `localStorage.MONITOR_TOKEN` / `window.MONITOR_TOKEN` 自动带头。
 
@@ -250,6 +255,25 @@ python grok_register_ttk.py
 - `proxies.txt` 可从界面导入；只有面板池完全未配置时，worker 才直接兼容旧文件 / `config.proxy`
 
 代理池不抓取、不分发公共代理，只管理操作者自己提供的外部代理。
+
+### 邮箱服务与高级域名轮换
+
+- 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`
+- 切换服务商时只显示该服务实际支持的字段；保存后新的注册任务读取 `config.json`
+- 已保存的 API Key、JWT 和密码不会通过接口或页面回显；密钥输入留空会保留原值，必须点“清除”并保存才会删除
+- “测试当前提供商”使用表单中的未保存内容做非破坏性连通性检查，不会改写 `config.json`
+- `config.json` 以原子方式更新并保持 `0600`，现有无关配置项不会被覆盖
+
+域名轮换位于邮箱服务页的高级设置中：
+
+- 支持导入根域名或已有子域名，并绑定 `cloudflare`、`cloudmail`、`moemail`、`yyds` provider
+- 每个 provider 可设置最大活跃域名数；超出部分待命，活跃域名停用或拉黑后自动补位
+- xAI 明确拒绝邮箱域名时累计连续失败，达到阈值后自动拉黑；成功提交邮箱后清零连续失败
+- 邮箱 API、验证码超时和普通网络异常不会处罚域名，避免把基础设施故障误判成域名质量问题
+- 通过“启用”“重置”“删除”管理条目；对应 provider 的面板池配置后，域名池耗尽不会回退旧配置
+- `duckmail` 与 `mailnest` 的域名由上游服务分配，不能在面板中伪造自定义域名池
+
+域名池只保存域名和运行统计，不保存邮箱账号密码或 provider 密钥。
 
 ### 时段成功率
 
@@ -314,6 +338,7 @@ Cloudflare Worker 的 `defaultDomains` 默认按原值创建邮箱。只有邮�
 │   ├── security_utils.py      # redact / token 校验
 │   ├── blacklist_store.py     # 锁保护的 JSON 黑名单状态
 │   ├── proxy_store.py         # 外部代理池、探活、冷却与脱敏视图
+│   ├── email_domain_store.py  # 邮箱域名池、拒绝阈值与轮换状态
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
 │   └── blacklist_ops.py       # 面板黑名单接口
@@ -362,8 +387,11 @@ A: 打开顶部“代理池”查看异常和冷却原因，重新检测后只�
 **Q: 提示“面板代理池没有健康且启用的代理”？**
 A: 导入项尚未检测、已停用、检测失败或仍在冷却。先在代理池页面执行“检测全部”；面板池已配置时不会回退复用旧文件中的坏代理。
 
+**Q: 邮箱域名被自动拉黑，或域名池没有可用项？**
+A: 只有 xAI 明确拒绝邮箱域名才会累计。打开“邮箱服务”并展开“域名轮换 · 高级设置”查看连续拒绝次数，确认 provider 与域名绑定正确；可手动重置或启用其它待命域名。邮箱 API、验证码超时不会触发域名拉黑。
+
 **Q: 邮箱 API 401？**  
-A: 与代理无关，检查 `config.json` 里对应 provider 的 key / auth_mode。
+A: 打开“邮箱服务”检查对应 provider 的 Key / JWT / `auth_mode`，保存后点“测试当前提供商”。页面不会回显已保存密钥，输入框留空表示保留原值。
 
 **Q: `Address already in use` / 面板打不开？**  
 A: 8787 被其它进程占用（例如同机其它服务）。换 `MONITOR_PORT`，或先释放端口。绑定失败**不会**自动改绑 `0.0.0.0`。
@@ -400,7 +428,7 @@ bash brain/bin/qmd update
 ## 安全
 
 - **必须**设置 `MONITOR_TOKEN`；不要把 token 提交进仓库或贴进公开 issue  
-- **不要提交** `config.json`、`accounts/`、`cpa_auth/`、`proxies.txt`、`log/proxy_pool.json`、真实 stickies、`log/monitor.token`
+- **不要提交** `config.json`、`accounts/`、`cpa_auth/`、`proxies.txt`、`log/proxy_pool.json`、`log/email_domain_pool.json`、真实 stickies、`log/monitor.token`
 - `.gitignore` 已忽略上述路径  
 - 运行数据、日志、PID、代理和账号文件使用 0600，父目录使用 0700
 - API 响应带 CSP、禁止 iframe、安全类型与 Referrer Policy；请求体上限 64 KiB
@@ -418,6 +446,17 @@ bash brain/bin/qmd update
 | 路径 | `run_batch_headless` / blacklist 使用包相对 ROOT，无硬编码机器路径 |
 | 稳定性 | `from __future__` 置顶；`Path` 先于 `chdir`；workers DOM id 拆分 |
 | 结果流 | `register_results.jsonl` 仅 JSON 行 |
+
+## Star History
+
+<a href="https://github.com/lij768423-svg/grok-register-panel/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/star-history-dark.svg">
+    <img alt="Grok Register Panel GitHub Star 增长趋势" src="docs/star-history-light.svg">
+  </picture>
+</a>
+
+图表根据 GitHub Stargazer 时间戳生成，由 GitHub Actions 每日更新，不依赖第三方绘图接口。
 
 ## 友情链接
 

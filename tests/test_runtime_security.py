@@ -95,8 +95,9 @@ def test_permission_hardener_covers_runtime_pools_without_following_symlinks():
         sticky_pool = root / "stickies-us.txt"
         cache_file = root / ".next_action_id.cache"
         state_pool = root / "log" / "proxy_pool.json"
+        domain_pool = root / "log" / "email_domain_pool.json"
         state_pool.parent.mkdir()
-        for path in (proxy_pool, sticky_pool, cache_file, state_pool):
+        for path in (proxy_pool, sticky_pool, cache_file, state_pool, domain_pool):
             path.write_text("secret\n", encoding="utf-8")
             path.chmod(0o644)
 
@@ -107,7 +108,7 @@ def test_permission_hardener_covers_runtime_pools_without_following_symlinks():
             text=True,
         )
 
-        for path in (proxy_pool, sticky_pool, cache_file, state_pool):
+        for path in (proxy_pool, sticky_pool, cache_file, state_pool, domain_pool):
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(external_secret.stat().st_mode) == 0o644
 
