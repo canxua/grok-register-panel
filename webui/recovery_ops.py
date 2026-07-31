@@ -15,6 +15,7 @@ try:
         terminate_managed_processes,
         write_pid_file,
     )
+    from webui.proxy_store import worker_proxy_snapshot
 except ImportError:  # running from webui/
     import sys
 
@@ -27,6 +28,7 @@ except ImportError:  # running from webui/
         terminate_managed_processes,
         write_pid_file,
     )
+    from proxy_store import worker_proxy_snapshot  # type: ignore
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +56,16 @@ def _verification_enabled() -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _managed_recovery_proxy() -> str:
+    snapshot = worker_proxy_snapshot()
+    if not snapshot.get("configured"):
+        return ""
+    urls = list(snapshot.get("urls") or [])
+    if not urls:
+        raise RuntimeError("managed proxy pool has no healthy enabled proxy")
+    return str(urls[0] or "").strip()
 
 
 def _parse_line(line: str) -> tuple[str, str] | None:
@@ -216,6 +228,10 @@ def start_recovery(scope: str = "pending") -> dict:
             "error": "pending recovery requires CPA_AUTO_VERIFY=1",
             "status": status,
         }
+    try:
+        recovery_proxy = _managed_recovery_proxy()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "status": status}
 
     ensure_private_dir(LOG_DIR)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -242,13 +258,16 @@ def start_recovery(scope: str = "pending") -> dict:
     else:
         command.extend(("--accounts-dir", str(ACCOUNTS_DIR)))
     try:
+        child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        if recovery_proxy:
+            child_env["CPA_PROXY"] = recovery_proxy
         process = subprocess.Popen(
             command,
             cwd=str(ROOT),
             stdout=output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=child_env,
         )
     finally:
         output.close()

@@ -19,6 +19,7 @@ from sso_to_auth_json import (
     parse_sso_line,
     should_create_default_out_dir,
 )
+from webui import recovery_ops
 
 
 TOKEN_A = "a" * 80
@@ -76,9 +77,32 @@ def test_existing_cpa_email_detection():
         assert existing_cpa_emails(root) == {"person@example.com"}
 
 
+def test_recovery_uses_managed_proxy_and_fails_closed_when_empty():
+    original = recovery_ops.worker_proxy_snapshot
+    try:
+        recovery_ops.worker_proxy_snapshot = lambda: {
+            "configured": True,
+            "urls": ["socks5h://127.0.0.1:40000"],
+        }
+        assert recovery_ops._managed_recovery_proxy() == "socks5h://127.0.0.1:40000"
+
+        recovery_ops.worker_proxy_snapshot = lambda: {"configured": True, "urls": []}
+        try:
+            recovery_ops._managed_recovery_proxy()
+            raise AssertionError("configured empty pool must fail closed")
+        except RuntimeError as exc:
+            assert "no healthy enabled proxy" in str(exc)
+
+        recovery_ops.worker_proxy_snapshot = lambda: {"configured": False, "urls": []}
+        assert recovery_ops._managed_recovery_proxy() == ""
+    finally:
+        recovery_ops.worker_proxy_snapshot = original
+
+
 if __name__ == "__main__":
     test_parser_preserves_email_and_password()
     test_queue_dedup_and_consume()
     test_cpa_only_batch_does_not_create_auth_out()
     test_existing_cpa_email_detection()
+    test_recovery_uses_managed_proxy_and_fails_closed_when_empty()
     print("OK sso recovery")

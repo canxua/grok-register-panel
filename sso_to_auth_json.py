@@ -1841,6 +1841,7 @@ def _resolve_config_path(base: Path, value: object) -> str:
 
 def apply_config_defaults(args) -> None:
     if not args.from_config:
+        args.proxy = args.proxy or str(os.environ.get("CPA_PROXY") or "").strip()
         args.cpa_remote_url = args.cpa_remote_url or str(
             os.environ.get("CPA_REMOTE_URL") or os.environ.get("CLIPROXY_MANAGEMENT_URL") or ""
         ).strip()
@@ -1893,7 +1894,9 @@ def apply_config_defaults(args) -> None:
     args.cpa_data_plane_model = args.cpa_data_plane_model or str(
         config.get("cpa_data_plane_model") or os.environ.get("CPA_DATA_PLANE_MODEL") or ""
     ).strip()
-    args.proxy = args.proxy or str(config.get("proxy") or "").strip()
+    args.proxy = args.proxy or str(
+        os.environ.get("CPA_PROXY") or config.get("proxy") or ""
+    ).strip()
     if not args.prefer:
         mode = str(config.get("cpa_token_mode") or "auth_code")
         args.prefer = "auth_code" if mode == "auth_code" else "device"
