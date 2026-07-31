@@ -50,7 +50,7 @@ ssh -N -L 18080:127.0.0.1:18080 ovh-ai-stack
    报告为 `1/1 verified`、失败 0、待处理 0。
 8. register-panel 现在通过 AI Stack 的 `/v1/credentials/import` 导入已验证 auth，
    controller 再统一写入 CLIProxy。控制器契约已允许 CLIProxy 现有的
-   `xai-<email>.json` 文件名，同时仍拒绝 `/`、`..` 和非 JSON 名称。
+   `xai-<email>.json` 文件名，同时仍拒绝路径分隔符和非 JSON 名称。
 9. 最终现场回归为：精确 provider `200`、控制器导入 `200`、公网数据面 `200`；
    controller `103 ACTIVE / 119 total`，CLIProxy `104 enabled`。本次新 auth 在两边都
    精确匹配 1 条，已经进入 AI Stack 监控，不再只是 CLIProxy 文件。
