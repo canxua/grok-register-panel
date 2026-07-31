@@ -345,6 +345,26 @@ A: 看 `log/orch100-stdout.log` 与最新 `log/batch-*.log`；欢迎提 issue / 
 **Q: accounts 文本或待处理 SSO 怎么补录 CPA？**
 A: 在控制台使用“账号补录”。待处理模式成功后自动出队；扫描全部账号模式会保留原始文本，并跳过本地 CPA 已存在邮箱。
 
+## AI 会话连续性（Trellis）
+
+仓库已集成
+[`craigcossairt/trellis` v1.1.0](https://github.com/craigcossairt/trellis/releases/tag/v1.1.0)：
+
+- Codex 原生读取根目录 `AGENTS.md`；
+- Grok Build 通过 `.grok/config.toml` 复用同一套规则、命令、skills 和 hooks；
+- `docs/CURRENT_STATE.md` 保存可交接的现网快照与下一步；
+- `docs/decision-log.md` 和 `docs/common-gotchas.md` 保存长期决策与故障经验；
+- `brain/` 为本地可重建知识索引，生成内容不会提交到 git。
+
+开始新会话时在仓库根目录打开 Codex 或 Grok 即可。重要变更后刷新本地索引：
+
+```bash
+bash brain/scripts/ingest.sh
+bash brain/bin/qmd update
+```
+
+安装口径、升级方式和各工具接线见 [docs/TRELLIS.md](docs/TRELLIS.md)。
+
 ## 安全
 
 - **必须**设置 `MONITOR_TOKEN`；不要把 token 提交进仓库或贴进公开 issue  

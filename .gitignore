@@ -22,3 +22,21 @@ stickies*.txt
 *.bak*
 *.fixed-keep
 .DS_Store
+
+# Trellis local harness state and secrets
+.env.*
+!.env.example
+.mcp.json
+.claude/settings.local.json
+*.pem
+*.key
+
+# Trellis project brain is regenerated locally
+brain/raw/*
+!brain/raw/.gitkeep
+brain/summaries/*
+!brain/summaries/.gitkeep
+brain/.last-ingest
+brain/log.md
+brain/index.md
+brain/hooks/debug.log
