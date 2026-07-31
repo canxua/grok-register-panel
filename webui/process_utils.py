@@ -9,6 +9,11 @@ import time
 from pathlib import Path
 
 try:
+    import psutil
+except ImportError:  # Linux deployments can still use procfs during upgrades.
+    psutil = None
+
+try:
     from secure_files import atomic_write_text
 except ImportError:  # running from webui/
     import sys
@@ -24,6 +29,12 @@ def _cmdline(pid: int) -> list[str]:
         raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
         return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
     except (OSError, ValueError):
+        pass
+    if psutil is None:
+        return []
+    try:
+        return psutil.Process(int(pid)).cmdline()
+    except (psutil.Error, ValueError):
         return []
 
 
@@ -31,7 +42,28 @@ def _cwd(pid: int) -> Path | None:
     try:
         return Path(os.readlink(f"/proc/{int(pid)}/cwd")).resolve()
     except (OSError, ValueError):
+        pass
+    if psutil is None:
         return None
+    try:
+        return Path(psutil.Process(int(pid)).cwd()).resolve()
+    except (psutil.Error, OSError, ValueError):
+        return None
+
+
+def _process_ids() -> list[int]:
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        try:
+            return [int(entry.name) for entry in proc_root.iterdir() if entry.name.isdigit()]
+        except OSError:
+            pass
+    if psutil is None:
+        return []
+    try:
+        return psutil.pids()
+    except (psutil.Error, OSError):
+        return []
 
 
 def _resolved_arg(arg: str, cwd: Path) -> Path | None:
@@ -67,11 +99,7 @@ def find_managed_processes(
     script_names: tuple[str, ...] | list[str],
 ) -> list[dict]:
     found = []
-    proc_root = Path("/proc")
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
+    for pid in _process_ids():
         if not process_matches(pid, root, script_names):
             continue
         cmdline = _cmdline(pid)
