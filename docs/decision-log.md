@@ -13,3 +13,4 @@ Format: `- **YYYY-MM-DD** - Decision description. See <issue-ref>.`
 - **2026-07-31** - Treat controller `ACTIVE`, CLIProxy auth file count, and exact per-auth verification as separate metrics. See `CURRENT_STATE.md`.
 - **2026-07-31** - Adopt `craigcossairt/trellis` v1.1.0 with Codex/Grok adapters and a local project brain; preserve existing project docs and code. See `TRELLIS.md`.
 - **2026-07-31** - Inject only the required CLIProxy management and New API client keys through a dedicated mode-`0600` panel bridge env; do not load the controller's database-bearing secret file. See `CURRENT_STATE.md`.
+- **2026-07-31** - Keep the legacy stack after the first successful bridge replay; retirement requires multiple new-account end-to-end canaries and an explicit operator decision. See `CURRENT_STATE.md`.

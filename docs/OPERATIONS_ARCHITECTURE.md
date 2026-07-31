@@ -258,12 +258,12 @@ flowchart LR
 |---|---|---|
 | 二级域名邮箱端到端 | 已完成 | 增加时延和失败率指标 |
 | Chrome 指纹预检 + Camoufox | 已完成 | 保持与正式 worker 相同出口 |
-| 单账号 Device Flow + 数据面验收 | 已完成 1 次人工 canary | 将数据面探针自动化为终态，不以文件数量代替健康度 |
+| 单账号 Device Flow + 数据面验收 | 已有完整人工样本；四门禁回放已自动到达 `verified` | 用新注册账号再跑一个完整 canary |
 | 安全控制台、loopback、Token、0600 | 已完成 | 可选接入 tailnet 或额外身份网关 |
-| 新 panel auth 进入现有 CLIProxy 数据面 | 本地代码完成，生产未验证 | 通过 loopback Management API 上传，确认热加载后从现有 API 路径探测 |
+| 新 panel auth 进入现有 CLIProxy 数据面 | 已部署；已有 SSO 回放中 provider、热加载和公网数据面均为 200 | 继续保持默认关闭，只在单账号 canary 临时开启 |
 | 旧补号组件收敛 | 未完成 | 旧 5 容器约 155 MiB；auth 桥验收后先停 worker/browser/mail，controller 最后处理 |
 | 旧文件代理轮换 | 部分完成 | 当前凭据 `407`，不能用于生产扩容 |
-| 健康感知代理池与冷却 | 当前部署未完成 | 兼容合并上游 PR #6 的 `webui/proxy_store.py` |
+| 健康感知代理池与冷却 | 代码已部署，现有供应商材料返回 `407` | 修复供应商授权/余额后做 sticky 出口 canary |
 | 账号级代理 lease | 部分完成 | 当前按 worker 索引绑定，缺少持久 lease 和崩溃归还 |
 | 持久任务状态机与幂等 | 未完成 | 引入 SQLite；日志不再承担任务数据库职责 |
 | 全局和每出口速率限制 | 未完成 | 加 token bucket、Retry-After 和独立出口预算 |
@@ -273,8 +273,8 @@ flowchart LR
 
 上游 `d0b7c6c` 已合并[受管外部代理池 PR #6](https://github.com/lij768423-svg/grok-register-panel/pull/6)，
 包含导入、探活、账号全流程固定出口、网络短冷却、风控长冷却和 fail-closed。
-当前 OVH 分支同时包含精确邮箱域名、共享代理文件和安全默认值等本地修复，两条分支
-已经发生代码级分叉，应该做兼容合并和回归测试，而不是直接覆盖线上目录。
+当前 OVH commit 已兼容合并上游代理池、邮箱域名、共享代理文件和本地安全修复，并通过
+完整发布测试；外部住宅代理是否可用仍由供应商授权和余额决定。
 
 2026-07-31 的现网审计还确认：register-panel 常驻内存约 14 至 26 MiB；项目磁盘约
 1.6 GiB 主要由仍必需的 Camoufox cache（约 1.3 GiB）和 `.venv`（约 329 MiB）组成，
@@ -283,12 +283,12 @@ flowchart LR
 
 ## 9. 实施顺序
 
-1. **P0 - 先补 auth 桥**：通过 loopback Management API 将新 panel auth 同步到现有
-   CLIProxy，验证文件热加载；密钥只从 0600 secret 读取。
-2. **P0 - 建立真实成功门禁**：本次 token 精确探针、上传、热加载和现有 API 数据面
-   全部通过后才写 `verified`，历史 `ok` 视为 `legacy_unverified`。
-3. **P0 - 再补出口**：更新有效的动态住宅代理凭据，兼容合并上游 managed proxy
-   pool；每账号生成一个 session 并全流程 sticky，保持 `workers=1` 做 canary。
+1. **P0 - auth 桥（已完成）**：loopback Management API、热加载、专用 0600 secret
+   和公网数据面已经在生产回放中通过。
+2. **P0 - 真实成功门禁（桥接已完成）**：只有本次 token 的四道门禁全部通过才写
+   `verified`；新注册账号仍需通过 Turnstile 后再完成一次端到端 canary。
+3. **P0 - 补有效出口**：更新有效的动态住宅代理凭据；每账号生成一个 session 并全流程
+   sticky，保持 `workers=1` 做 canary。
 4. **P1 - 持久状态**：加入 SQLite task/account 幂等键、proxy lease、心跳、死信和重放。
 5. **P1 - 收敛旧组**：先停旧 worker、standby、browser context 和 mail relay；完成
    controller 能力替代并调整 cloudflared 后，才处理 controller。

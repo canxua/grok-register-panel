@@ -7,6 +7,8 @@
   OpenAI-compatible data-plane probe.
 - Persist masked per-credential verification transitions and count only
   `verified` as success when the gate is enabled.
+- Give the exact-provider probe enough bounded output budget to complete while
+  continuing to reject generic HTTP 200 and incomplete responses.
 - Supervise headless batches and automatically resume remaining task slots after a Playwright/Camoufox driver crash or stall.
 - Persist batch slot progress atomically so completed accounts are not repeated during recovery.
 

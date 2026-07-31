@@ -425,6 +425,9 @@ bash brain/bin/qmd update
 
 安装口径、升级方式和各工具接线见 [docs/TRELLIS.md](docs/TRELLIS.md)。
 
+逐凭据 provider quota、网关 token/cost 和 auth health 的口径及开源看板选型见
+[docs/CREDENTIAL_QUOTA_DASHBOARD.md](docs/CREDENTIAL_QUOTA_DASHBOARD.md)。
+
 ## 安全
 
 - **必须**设置 `MONITOR_TOKEN`；不要把 token 提交进仓库或贴进公开 issue  

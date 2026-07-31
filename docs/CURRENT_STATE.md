@@ -1,93 +1,86 @@
-# Current State
+# 当前状态
 
-This is the volatile handoff for the next Codex or Grok session. Update it when
-live facts or priorities change. Stable architecture belongs in the linked
-architecture documents.
+这是供下一次 Codex 或 Grok 会话接手的动态快照。现网事实或优先级变化后更新本文件；
+稳定架构放在关联的架构文档中。
 
-## Snapshot
+## 快照
 
-- **Verified at:** 2026-07-31 21:47 Asia/Shanghai
-- **Local repository:** `/Users/jack/project/github/grok-register-panel`
-- **Remote register panel:** `/opt/grok-register-panel` on the OVH host
-- **Remote AI stack:** `/opt/ai-stack` on the same OVH host
-- **Panel access:** loopback `127.0.0.1:18080` through an SSH tunnel
-- **Public data plane:** `api.canxu.top`
-- **Operations console:** `ops.canxu.top`
-- **Local test environment:** `.venv` on Python 3.11.14 with pinned direct
-  dependencies installed; browser engine assets were not fetched locally
+- **核验时间：** 2026-07-31 22:34 Asia/Shanghai
+- **本地仓库：** `/Users/jack/project/github/grok-register-panel`
+- **OVH 运行代码修复基线：** `fa28bdf`（文档交接提交可能更新其后的 HEAD）
+- **可写远端：** `https://github.com/canxua/grok-register-panel` 的 `main`
+- **原始上游：** `lij768423-svg/grok-register-panel`；当前 GitHub 身份对其 push 返回 `403`
+- **OVH register-panel：** `/opt/grok-register-panel`
+- **同机 AI Stack：** `/opt/ai-stack`
+- **新面板入口：** 仅监听 `127.0.0.1:18080`，需通过 SSH tunnel 访问
+- **公网数据面：** `api.canxu.top`
+- **运维控制台：** `ops.canxu.top`
+- **本地测试：** `.venv` / Python 3.11.14，完整发布测试通过
 
-## Confirmed Live Facts
+## 已确认的现网事实
 
-1. Registration artifacts are stored on OVH, not in the local checkout. The
-   local `accounts/`, `cpa_auth/`, and `log/` directories only contain tracked
-   placeholders.
-2. Remote `/opt/grok-register-panel/cpa_auth` contains two private auth JSON
-   records. The latest was written at 2026-07-31 04:20:37 UTC. Runtime files and
-   directories are owner-only (`0600` files and `0700` directories).
-3. `grok-register-panel.service` is enabled and active, but only the monitor
-   process is currently running. There is no active registration child process,
-   systemd timer, or cron registration job.
-4. The latest one-account batch finished at 2026-07-31 04:20:38 UTC with one
-   registration success and zero failures. The previous full canary also passed
-   an independent Grok Build data-plane probe.
-5. The new panel's `cpa_auth` directory is not mounted or uploaded into the
-   existing CLIProxy auth volume. A new registration is therefore not yet
-   automatically available through the public AI Stack.
-6. At 2026-07-31 12:42 Asia/Shanghai, the controller reported 100 `ACTIVE`
-   account rows against a target of 100. The screenshot accurately reflected
-   the frontend value at 12:28, but that 101 meant controller `ACTIVE` rows, not
-   101 credentials that had each just passed an independent provider request.
-7. CLIProxy had 102 JSON files in its PostgreSQL-backed auth directory at the
-   same audit point. File count, controller `ACTIVE` count, and independently
-   verified credentials are deliberately different metrics.
-8. The local branch now implements the feature-flagged four-gate publication
-   state machine and passes the full release suite. It has not yet been deployed
-   to OVH, so this is an implementation fact rather than a production success.
-9. Live contract probes returned `200` from CLIProxy `/v1/models`, public New API
-   `/v1/models`, and a minimal public `grok-4.5` chat completion with standard
-   `id` and `choices` fields.
-10. The management key in `cliproxy-client.env` returned `401`; the distinct key
-    in root-owned `pool-controller.env` returned `200` and listed 102 auth files.
-    Deployment must copy only the required values into a dedicated mode-`0600`
-    panel bridge env, not load the whole controller secret file.
+1. 注册账号、SSO、CPA auth 和日志都保存在 OVH；本地 checkout 的对应目录只有占位文件。
+2. `grok-register-panel.service` 已部署 `fa28bdf`，处于 `active/enabled`；loopback health 和
+   鉴权 API 均返回 `200`。
+3. 生产已创建独立、root-only 的 `.cpa-bridge.env`，systemd 只注入 Management API、
+   New API 和四门禁所需值，没有把 controller 的数据库 secret 整包加载进面板。
+4. 2026-07-31 的已有 SSO 单凭据回放完整经过
+   `token_written -> provider_verified -> pool_uploaded -> pool_loaded ->
+   data_plane_verifying -> verified`。精确 provider、CLIProxy 热加载和公网数据面均返回
+   `200`；成功记录已从 `sso_pending` 原子出队。
+5. 回放首次失败不是 token 被拒：provider 已返回 `HTTP 200`，但探针把
+   `max_output_tokens` 设为 `2`，极可能令响应成为 `incomplete`。`fa28bdf` 将固定小预算
+   提升到 `16`，仍严格拒绝 `incomplete` 和通用 `200`；修复后同一凭据回放通过。
+6. 新账号端到端 canary 仍未闭环。单账号、单 worker、零 slot retry 的测试在约 92 秒后
+   停于资料页 Turnstile：`wait-cf:0 (cf_rounds=1/3, 建议换出口)`；它发生在 SSO/auth
+   生成之前，因此没有进入 CPA 状态机，也不是桥接失败。
+7. canary 后 `CPA_AUTO_VERIFY` 已恢复为 `0`；当前没有注册子进程、timer 或 cron
+   自动注册任务。下一次只在受控单账号 canary 期间临时开启。
+8. OVH 的 `cpa_auth` 仍有 2 个私有 auth 文件。另有 1 个隔离 canary 文件；运行目录和
+   文件保持 `0700/0600`。文件数量不等于逐凭据健康数。
+9. 2026-07-31 12:42 的 controller 为 100 个 `ACTIVE` 行、CLIProxy 为 102 个 auth JSON。
+   截图中的 101 是当时 controller 的活动行计数，不代表 101 条都刚刚通过独立 provider
+   请求。`ACTIVE`、auth 文件数、`verified` 必须分别展示。
+10. Managed proxy pool 代码、探活、冷却、fail-closed 和脱敏测试已经合并并部署；但现有
+    住宅代理材料抽样返回 `407`，所以它目前没有可用出口，不能提升注册并发。
+11. Trellis v1.1.0 已接入 Codex/Grok；`AGENTS.md`、当前状态、决策、gotchas 和本地 BM25
+    brain 构成交接链。向量检索仍受本机 QMD/Metal 后端问题影响，不作为启动依赖。
 
-## Current Operating Mode
+## 当前运行模式
 
-- New panel: manual `batch` mode, one worker, one account, zero slot retries.
-- Continuous auto-registration: not running.
-- Legacy pool containers: still running and intentionally retained.
-- Residential proxy pool: not usable; sampled credentials return `407`.
-- Registration egress: current canaries use OVH direct with browser-compatible
-  request fingerprinting.
+- 新面板：手动 `batch`，固定一账号、一 worker、零 slot retry。
+- 连续自动注册：未运行。
+- 四门禁：代码和生产桥接回放已验证；默认开关关闭。
+- 旧 pool/controller 组件：继续运行并保留，按用户决定暂不收敛。
+- 注册出口：OVH 直连能打开 signup，但最新资料页 Turnstile canary 超时。
+- 住宅代理：功能可用、外部凭据不可用（`407`）。
 
-## Open Work In Priority Order
+## 未完成事项（按优先级）
 
-1. Deploy the tested bridge code and a dedicated `0600` bridge env to OVH, keep
-   `CPA_AUTO_VERIFY=0`, then enable it only for one controlled account canary.
-2. Prove one production transition through exact provider verification, upload,
-   hot-load confirmation, public data-plane response, and final `verified`.
-3. Add a per-credential quota view. CLIProxyAPI v7.2.80 exposes auth health and
-   request statistics but not provider quota windows natively. Evaluate
-   CLIProxy Quota Tray first; keep provider-reported windows separate from local
-   token/cost estimates.
-4. Operate the merged managed proxy pool after valid provider credentials are
-   available, retaining one-account sticky sessions and fail-closed behavior.
-5. Add SQLite task/account/proxy leases before increasing concurrency.
+1. 提供一份余额和授权正常、允许 OVH 连接的住宅代理，先探活，再用同一账号全流程
+   sticky session 跑一个新账号 canary；只有它到达 `verified` 才算注册端闭环。
+2. 保持旧组件运行，累积多个新账号端到端样本后再讨论退役；不得因一次已有 SSO 回放
+   成功就删除旧 auth、volume 或 controller。
+3. 增加 SQLite 的 task/account/proxy lease、心跳、幂等键和重放，再考虑升到 2 workers。
+4. 增加逐凭据额度视图。现网 CLIProxyAPI 为 `v7.2.88`，官方上游已移除内置 usage
+   statistics；中央 Web 看板优先采用 CPA-Manager-Plus，桌面快速核验可用 CLIProxy
+   Quota Tray。provider quota、本地 token/cost 和 auth health 必须分开展示。
+5. 增加阶段耗时、出口、流量和失败域指标，以 `verified` 成功率、P95 和单凭据成本衡量。
 
-## Resume Checklist
+## 恢复检查
 
 ```bash
 git status --short --branch
-bash brain/bin/qmd search "current OVH auth bridge verified"
+bash brain/bin/qmd search "OVH CPA verified Turnstile"
 PYTHON_BIN=.venv/bin/python bash scripts/run_tests.sh
 ```
 
-Before changing production, re-run the relevant live audit because counts and
-process state are expected to drift.
+生产修改前重新核验进程、服务、代理和凭据计数；这些事实会漂移。
 
-## Related Documents
+## 关联文档
 
-- [Registration architecture](OPERATIONS_ARCHITECTURE.md)
-- [Convergence and reliability gaps](CONVERGENCE_AND_GAPS.md)
-- [Trellis integration](TRELLIS.md)
-- [Deployment and rollback](../DEPLOYMENT.md)
+- [注册架构](OPERATIONS_ARCHITECTURE.md)
+- [收敛与可靠性缺口](CONVERGENCE_AND_GAPS.md)
+- [Trellis 接入](TRELLIS.md)
+- [逐凭据额度与用量看板](CREDENTIAL_QUOTA_DASHBOARD.md)
+- [部署与回滚](../DEPLOYMENT.md)

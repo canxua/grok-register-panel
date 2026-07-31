@@ -459,11 +459,11 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 
 | 优先级 | 能力 | 当前状态 | 解决方案 | 完成定义 |
 |---|---|---|---|---|
-| P0 | 新 panel -> CLIProxy auth 桥 | **代码已实现，生产未部署** | loopback Management API + 专用 0600 bridge env | 新 auth 上传并热加载可见 |
-| P0 | 自动成功终态 | **四门禁已接主流程，待生产 canary** | feature flag + `verified` 状态 | 面板只统计真实数据面通过记录 |
-| P0 | 代理日志脱敏 | **本地分支仍有原始 URL 日志点** | 所有输出统一 `redact_proxy()` | 测试与日志扫描无 credential |
+| P0 | 新 panel -> CLIProxy auth 桥 | **已部署；已有 SSO 回放通过** | loopback Management API + 专用 0600 bridge env | 本次 auth 上传、热加载和数据面均为 200 |
+| P0 | 自动成功终态 | **四门禁已部署；回放到达 `verified`** | feature flag + `verified` 状态 | 新账号 canary 仍需越过 Turnstile 后验证 |
+| P0 | 代理日志脱敏 | **代码与发布测试已完成** | 所有输出统一 `redact_proxy()` | 测试与日志扫描无 credential |
 | P0 | 有效动态住宅资源 | **现有代理返回 407** | 更新供应商凭据/余额，按 task 生成 sticky session | 同一账号出口不变、下账号可轮换 |
-| P1 | managed proxy pool | **上游已实现，本地未兼容合并** | 移植 `proxy_store`、API、fail closed 和错误回写 | 探活、短/长冷却、禁用、脱敏测试通过 |
+| P1 | managed proxy pool | **代码已合并部署；外部凭据返回 407** | 修复供应商授权/余额后启用 sticky session | 探活、短/长冷却、禁用、脱敏测试已通过 |
 | P1 | SQLite 任务账本 | **未实现** | jobs/tasks/accounts/proxies + WAL/lease | 重启、重复回调、worker crash 均不重复计数 |
 | P1 | 旧补号 worker 收敛 | **仍运行，约 155 MiB** | G0-G3 分阶段 stop | 停旧组后 24 小时真实请求无回归 |
 | P1 | controller 能力替代 | **未实现** | auth health、disable/delete、ops API 迁移 | cloudflared 改路由后 controller 可停 |
@@ -473,11 +473,10 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 ### 当前缺少的外部输入
 
 - 一份有效、余额正常且允许 OVH 连接的动态住宅代理凭据；
-- CLIProxy Management API 的现有管理密钥，以 0600 secret 方式提供给新 panel；
 - 决定是否继续保留旧 controller 的公开运维入口；这影响 cloudflared 的最终 route。
 
-在这些输入到位前，可以完成代码兼容、SQLite、自动状态机和测试，但不能把动态住宅、
-新旧 auth 数据面切换或旧组件退役写成“已完成”。
+Management API 与数据面密钥已经通过专用 `0600` bridge env 接入。在其余输入到位前，
+不能把动态住宅、新账号端到端注册或旧组件退役写成“已完成”。
 
 ## 7. 推荐实施批次
 
