@@ -199,8 +199,8 @@ scripts/run_xvfb_batch.sh 10
 需要域名访问时，不要把面板绑定到 `0.0.0.0`，也不要开放 OVH 防火墙端口。复用同机
 AI Stack Tunnel 的做法是：
 
-1. 将 `MONITOR_HOST` 设为 AI Stack Docker bridge 的固定网关地址，例如
-   `172.19.0.1`；保留长随机 `MONITOR_TOKEN`。
+1. 用 `docker network inspect ovh-ai-stack_ai_internal` 读取当前 gateway，再将
+   `MONITOR_HOST` 设为该具体地址，例如 `172.19.0.1`；保留长随机 `MONITOR_TOKEN`。
 2. 先从 Tunnel 所在 Docker 网络内请求 `http://172.19.0.1:18080/api/health`。
 3. 在 remotely managed Tunnel 中添加 `register.canxu.top ->
    http://172.19.0.1:18080`；DNS 由 Tunnel 路由创建。
@@ -215,6 +215,10 @@ curl --connect-timeout 2 http://OVH_PUBLIC_IP:18080/api/health  # 必须失败
 
 应急回滚是删除该 Tunnel hostname、把备份的 `.monitor.env` 恢复为 loopback 地址并重启
 `grok-register-panel.service`。不要删除账号、auth、日志或代理池状态。
+
+不要为了固定地址给已经运行的 Compose network 直接补写 IPAM；Compose 会尝试替换整张
+网络。计划重建网络时，先暂停变更，重建后读取新 gateway，同时更新面板绑定和 Tunnel
+origin，再完成 api/ops/register 三条路径回归。
 
 ## 9. 安全边界
 
