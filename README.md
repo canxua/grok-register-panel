@@ -68,6 +68,10 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 [注册系统架构与运行流程](docs/OPERATIONS_ARCHITECTURE.md)。该文档会区分已经部署的
 能力、社区经验和仍待实现的设计，避免把目标架构误写成线上现状。
 
+旧补号组件是否可停、动态住宅 session 怎样接、managed proxy pool/冷却/lease 的区别、
+SQLite 状态模型和面板 `verified` 自动终态见
+[系统收敛、动态出口与可靠性闭环](docs/CONVERGENCE_AND_GAPS.md)。
+
 ## 快速开始
 
 ### 环境
@@ -287,7 +291,9 @@ Cloudflare Worker 的 `defaultDomains` 默认按原值创建邮箱。只有邮�
 ├── email_providers/
 ├── tests/                     # 结构 / 脱敏 / chdir 冒烟
 ├── scripts/                   # xvfb 辅助脚本
-├── docs/OPERATIONS_ARCHITECTURE.md  # 当前架构、注册流程、耗时与目标架构
+├── docs/
+│   ├── OPERATIONS_ARCHITECTURE.md  # 当前架构、注册流程、耗时与目标架构
+│   └── CONVERGENCE_AND_GAPS.md     # 旧组件收敛、动态出口、SQLite 与自动成功
 ├── config.example.json
 ├── proxies.example.txt
 ├── requirements.txt

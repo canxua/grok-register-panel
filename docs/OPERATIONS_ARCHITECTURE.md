@@ -3,6 +3,9 @@
 本文记录当前 OVH 部署、完整注册状态机、已确认故障根因、实测耗时，以及从
 LINUX DO 帖子讨论和当前上游实现推导出的目标架构。
 
+旧组件收敛、动态住宅 session、managed proxy pool、SQLite lease 和自动成功终态的
+详细决策见[系统收敛、动态出口与可靠性闭环](CONVERGENCE_AND_GAPS.md)。
+
 ## 1. 文档口径
 
 - 核验日期：2026-07-31（Asia/Shanghai）
@@ -46,7 +49,7 @@ flowchart LR
     signup -->|"发送 OTP"| mail
     worker --> oauth["xAI Device Flow<br/>verify / approve / token"]
     oauth -->|"access + refresh token"| worker
-    auth --> build["Grok Build 数据面<br/>cli-chat-proxy.grok.com"]
+    auth -->|"当前仅独立探针"| build["Grok Build 数据面<br/>cli-chat-proxy.grok.com"]
 ```
 
 ### 当前边界
@@ -56,6 +59,8 @@ flowchart LR
 - 当前注册出口也是 OVH 直连，因为原有住宅代理样本均返回 `407 Proxy
   Authentication Required`。
 - 运行参数固定为 `batch=1`、`workers=1`、`max_slot_retry=0`。
+- 新面板的 `cpa_auth/` 与现有 AI stack 的 CLIProxy auth volume 是两个目录；当前没有
+  自动上传、挂载或热加载桥，因此“本地 auth 可独立探测”不等于“现有 API 已消费它”。
 - 控制面和执行面仍在同一进程目录中共享 `config.json`、`log/`、`accounts/`
   和 `cpa_auth/`。这是可运行的单机架构，不是完整的任务队列架构。
 
@@ -255,6 +260,8 @@ flowchart LR
 | Chrome 指纹预检 + Camoufox | 已完成 | 保持与正式 worker 相同出口 |
 | 单账号 Device Flow + 数据面验收 | 已完成 1 次人工 canary | 将数据面探针自动化为终态，不以文件数量代替健康度 |
 | 安全控制台、loopback、Token、0600 | 已完成 | 可选接入 tailnet 或额外身份网关 |
+| 新 panel auth 进入现有 CLIProxy 数据面 | 未完成 | 通过 loopback Management API 上传，确认热加载后从现有 API 路径探测 |
+| 旧补号组件收敛 | 未完成 | 旧 5 容器约 155 MiB；auth 桥验收后先停 worker/browser/mail，controller 最后处理 |
 | 旧文件代理轮换 | 部分完成 | 当前凭据 `407`，不能用于生产扩容 |
 | 健康感知代理池与冷却 | 当前部署未完成 | 兼容合并上游 PR #6 的 `webui/proxy_store.py` |
 | 账号级代理 lease | 部分完成 | 当前按 worker 索引绑定，缺少持久 lease 和崩溃归还 |
@@ -269,21 +276,31 @@ flowchart LR
 当前 OVH 分支同时包含精确邮箱域名、共享代理文件和安全默认值等本地修复，两条分支
 已经发生代码级分叉，应该做兼容合并和回归测试，而不是直接覆盖线上目录。
 
+2026-07-31 的现网审计还确认：register-panel 常驻内存约 14 至 26 MiB；项目磁盘约
+1.6 GiB 主要由仍必需的 Camoufox cache（约 1.3 GiB）和 `.venv`（约 329 MiB）组成，
+并不是旧容器残留。完整的保留/停用矩阵和回滚门禁见
+[收敛文档第 2 节](CONVERGENCE_AND_GAPS.md#2-旧架构是否应该去掉)。
+
 ## 9. 实施顺序
 
-1. **P0 - 先补出口**：更新有效的动态住宅代理凭据，兼容合并上游 managed proxy
-   pool，保持 `workers=1` 做分时 canary。
-2. **P0 - 建立门禁**：每次 canary 都必须经过邮箱、注册、SSO、OAuth、token 落盘和
-   Grok Build `HTTP 200`；分别统计 network、risk、provider denial。
-3. **P1 - 再提并发**：连续样本稳定后，在当前 2 vCPU 主机上升到 2 workers，要求
-   两个独立健康出口；比较成功率和 P95，而不是只比较平均速度。
-4. **P1 - 持久状态**：加入 SQLite 任务状态、账号幂等键、proxy lease、死信和人工重放。
-5. **P2 - 按需拆机**：只有单机 CPU、内存或浏览器稳定性成为真实瓶颈时，才拆分远程
+1. **P0 - 先补 auth 桥**：通过 loopback Management API 将新 panel auth 同步到现有
+   CLIProxy，验证文件热加载；密钥只从 0600 secret 读取。
+2. **P0 - 建立真实成功门禁**：本次 token 精确探针、上传、热加载和现有 API 数据面
+   全部通过后才写 `verified`，历史 `ok` 视为 `legacy_unverified`。
+3. **P0 - 再补出口**：更新有效的动态住宅代理凭据，兼容合并上游 managed proxy
+   pool；每账号生成一个 session 并全流程 sticky，保持 `workers=1` 做 canary。
+4. **P1 - 持久状态**：加入 SQLite task/account 幂等键、proxy lease、心跳、死信和重放。
+5. **P1 - 收敛旧组**：先停旧 worker、standby、browser context 和 mail relay；完成
+   controller 能力替代并调整 cloudflared 后，才处理 controller。
+6. **P1 - 再提并发**：连续样本稳定后升到 2 workers，要求两个独立健康 session；比较
+   verified 成功率、P95 和单位成本，而不是只比较平均速度。
+7. **P2 - 按需拆机**：只有单机 CPU、内存或浏览器稳定性成为真实瓶颈时，才拆分远程
    worker；控制面、邮箱和 auth store 仍保持单一事实来源。
 
 ## 10. 运维与验收入口
 
 - 部署和回滚：[DEPLOYMENT.md](../DEPLOYMENT.md)
 - 发布检查：[RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md)
+- 收敛与缺口：[CONVERGENCE_AND_GAPS.md](CONVERGENCE_AND_GAPS.md)
 - 项目总览：[README.md](../README.md)
 - 上游代理池提交：[`d0b7c6c`](https://github.com/lij768423-svg/grok-register-panel/commit/d0b7c6cdf30e2193acd1e9eb6d56b0e5201daad1)
