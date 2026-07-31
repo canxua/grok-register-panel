@@ -235,6 +235,9 @@ DEFAULT_CONFIG = {
     # 远程 CPA：通过 Management API POST /v0/management/auth-files 上传
     "cpa_remote_url": "",
     "cpa_management_key": "",
+    # 可选 AI Stack 控制器：启用后由它上传并登记，避免监控状态分叉。
+    "cpa_controller_url": "",
+    "cpa_controller_token": "",
     # 四门禁自动验证默认关闭；生产仅通过环境变量对单账号 canary 开启。
     "cpa_auto_verify": False,
     "cpa_verify_attempts": 2,
@@ -1067,6 +1070,17 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
         )
         or ""
     ).strip()
+    controller_url = str(
+        _config_or_env("cpa_controller_url", "CPA_CONTROLLER_URL") or ""
+    ).strip()
+    controller_token = str(
+        _config_or_env(
+            "cpa_controller_token",
+            "CPA_CONTROLLER_TOKEN",
+            "CONTROLLER_OPS_TOKEN",
+        )
+        or ""
+    ).strip()
     g2a_dir = str(config.get("grok2api_auth_dir", "") or "").strip()
     data_plane_url = str(
         _config_or_env("cpa_data_plane_url", "CPA_DATA_PLANE_URL") or ""
@@ -1098,17 +1112,17 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
     if g2a_dir and not os.path.isabs(g2a_dir):
         g2a_dir = os.path.join(APP_DIR, g2a_dir)
 
-    if not auth_dir and not remote_url and not g2a_dir:
+    if not auth_dir and not remote_url and not controller_url and not g2a_dir:
         if log_callback:
             log_callback(
-                "[Debug] 已开启 SSO→auth 但未配置 cpa_auth_dir / cpa_remote_url / grok2api_auth_dir，跳过"
+                "[Debug] 已开启 SSO→auth 但未配置 auth 目录、CPA 或控制器输出，跳过"
             )
         return _result("not_configured", legacy_ok=True, detail="no auth output configured")
     if remote_url and not management_key and not auto_verify:
         if log_callback:
             log_callback("[Debug] 已配置 cpa_remote_url 但未配置 cpa_management_key，跳过远程上传")
         remote_url = ""
-    if not auth_dir and not remote_url and not g2a_dir:
+    if not auth_dir and not remote_url and not controller_url and not g2a_dir:
         return _result("not_configured", legacy_ok=True, detail="no usable auth output configured")
     sso = _normalize_sso_token(raw_token)
     if not sso:
@@ -1197,16 +1211,26 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
         )
 
         if not auto_verify:
-            if remote_url:
+            if controller_url or remote_url:
                 try:
-                    name = _s2cpa.upload_cpa_auth_remote(
-                        remote_url,
-                        management_key,
-                        record,
-                        timeout=verify_timeout,
-                        proxy=proxy,
-                    )
-                    _cpa_log(f"已上传 CPA 远程 auth 文件 {mask_email(name)}")
+                    if controller_url:
+                        name = _s2cpa.import_cpa_auth_controller(
+                            controller_url,
+                            controller_token,
+                            record,
+                            timeout=verify_timeout,
+                            proxy=proxy,
+                        )
+                        _cpa_log(f"控制器已登记 auth 文件 {mask_email(name)}")
+                    else:
+                        name = _s2cpa.upload_cpa_auth_remote(
+                            remote_url,
+                            management_key,
+                            record,
+                            timeout=verify_timeout,
+                            proxy=proxy,
+                        )
+                        _cpa_log(f"已上传 CPA 远程 auth 文件 {mask_email(name)}")
                     wrote_ok = True
                 except Exception as remote_exc:
                     _cpa_log(
@@ -1262,14 +1286,30 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
                 detail="missing CPA remote URL or management key",
                 provider_status=provider_status,
             )
-        try:
-            name = _s2cpa.upload_cpa_auth_remote(
-                remote_url,
-                management_key,
-                record,
-                timeout=verify_timeout,
-                proxy=proxy,
+        if controller_url and not controller_token:
+            _append_sso_pending(email, sso, log_callback=log_callback)
+            return _result(
+                "pool_sync_failed",
+                detail="missing CPA controller token",
+                provider_status=provider_status,
             )
+        try:
+            if controller_url:
+                name = _s2cpa.import_cpa_auth_controller(
+                    controller_url,
+                    controller_token,
+                    record,
+                    timeout=verify_timeout,
+                    proxy=proxy,
+                )
+            else:
+                name = _s2cpa.upload_cpa_auth_remote(
+                    remote_url,
+                    management_key,
+                    record,
+                    timeout=verify_timeout,
+                    proxy=proxy,
+                )
         except Exception as remote_exc:
             _append_sso_pending(email, sso, log_callback=log_callback)
             return _result(
@@ -1279,10 +1319,17 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
             )
         _result(
             "pool_uploaded",
-            detail="Management API accepted auth payload",
+            detail=(
+                "pool controller imported auth payload"
+                if controller_url
+                else "Management API accepted auth payload"
+            ),
             provider_status=provider_status,
         )
-        _cpa_log(f"Management API 已接收 auth 文件 {mask_email(name)}")
+        if controller_url:
+            _cpa_log(f"AI Stack 控制器已登记 auth 文件 {mask_email(name)}")
+        else:
+            _cpa_log(f"Management API 已接收 auth 文件 {mask_email(name)}")
 
         loaded = _s2cpa.wait_cpa_auth_remote(
             remote_url,

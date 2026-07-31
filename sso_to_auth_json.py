@@ -1527,6 +1527,47 @@ def upload_cpa_auth_remote(
     return name
 
 
+def import_cpa_auth_controller(
+    base_url: str,
+    ops_token: str,
+    record: dict,
+    timeout: int = 30,
+    proxy: str = "",
+) -> str:
+    """Publish an auth record through the pool controller's tracked import API."""
+    base = str(base_url or "").strip().rstrip("/")
+    token = str(ops_token or "").strip()
+    if not base:
+        raise ValueError("cpa_controller_url 为空")
+    if not token:
+        raise ValueError("cpa_controller_token 为空")
+
+    name = cpa_auth_filename(record)
+    url = base if base.endswith("/v1/credentials/import") else f"{base}/v1/credentials/import"
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"auth_name": name, "auth": record},
+        timeout=timeout,
+        proxies=_request_proxies(url, proxy),
+        impersonate="chrome",
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"控制器导入失败 HTTP {resp.status_code}")
+    payload = _response_json(resp)
+    if (
+        not payload
+        or payload.get("auth_name") != name
+        or not payload.get("account_id")
+        or not payload.get("credential_id")
+    ):
+        raise RuntimeError(f"控制器导入响应无效 HTTP {resp.status_code}")
+    return name
+
+
 def wait_cpa_auth_remote(
     base_url: str,
     management_key: str,
@@ -1850,6 +1891,14 @@ def apply_config_defaults(args) -> None:
             or os.environ.get("CLIPROXY_MANAGEMENT_KEY")
             or ""
         ).strip()
+        args.cpa_controller_url = args.cpa_controller_url or str(
+            os.environ.get("CPA_CONTROLLER_URL") or ""
+        ).strip()
+        args.cpa_controller_token = args.cpa_controller_token or str(
+            os.environ.get("CPA_CONTROLLER_TOKEN")
+            or os.environ.get("CONTROLLER_OPS_TOKEN")
+            or ""
+        ).strip()
         args.cpa_data_plane_url = args.cpa_data_plane_url or str(
             os.environ.get("CPA_DATA_PLANE_URL") or ""
         ).strip()
@@ -1882,6 +1931,17 @@ def apply_config_defaults(args) -> None:
         or config.get("cpa_management_key")
         or ""
     ).strip()
+    args.cpa_controller_url = args.cpa_controller_url or str(
+        os.environ.get("CPA_CONTROLLER_URL")
+        or config.get("cpa_controller_url")
+        or ""
+    ).strip()
+    args.cpa_controller_token = args.cpa_controller_token or str(
+        os.environ.get("CPA_CONTROLLER_TOKEN")
+        or os.environ.get("CONTROLLER_OPS_TOKEN")
+        or config.get("cpa_controller_token")
+        or ""
+    ).strip()
     args.cpa_data_plane_url = args.cpa_data_plane_url or str(
         config.get("cpa_data_plane_url") or os.environ.get("CPA_DATA_PLANE_URL") or ""
     ).strip()
@@ -1909,6 +1969,7 @@ def should_create_default_out_dir(args, record_count: int) -> bool:
             args.out_dir,
             args.cpa_auth_dir,
             args.cpa_remote_url,
+            getattr(args, "cpa_controller_url", None),
             args.grok2api_auth_dir,
         )
     )
@@ -1976,6 +2037,16 @@ def main() -> int:
         help="远程 CPA 管理密钥（remote-management.secret-key 明文）",
     )
     ap.add_argument(
+        "--cpa-controller-url",
+        default=None,
+        help="AI Stack pool-controller 根地址；配置后由控制器统一上传并登记凭据",
+    )
+    ap.add_argument(
+        "--cpa-controller-token",
+        default=None,
+        help="pool-controller 运维 Token（优先通过 CPA_CONTROLLER_TOKEN 环境变量提供）",
+    )
+    ap.add_argument(
         "--grok2api-auth-dir",
         default=None,
         help="额外写出 Grok2API / ~/.grok 风格 g2a-<email>.json 到该目录",
@@ -2021,7 +2092,16 @@ def main() -> int:
         ap.error("使用 --cpa-remote-url 时必须同时提供 --cpa-management-key")
     if args.cpa_management_key and not args.cpa_remote_url:
         ap.error("使用 --cpa-management-key 时必须同时提供 --cpa-remote-url")
-    has_cpa_target = bool(args.cpa_auth_dir or args.cpa_remote_url or args.grok2api_auth_dir)
+    if args.cpa_controller_url and not args.cpa_controller_token:
+        ap.error("使用 --cpa-controller-url 时必须同时提供 --cpa-controller-token")
+    if args.cpa_controller_token and not args.cpa_controller_url:
+        ap.error("使用 --cpa-controller-token 时必须同时提供 --cpa-controller-url")
+    has_cpa_target = bool(
+        args.cpa_auth_dir
+        or args.cpa_remote_url
+        or args.cpa_controller_url
+        or args.grok2api_auth_dir
+    )
     if args.consume_success and has_cpa_target and not args.verify:
         ap.error("CPA 目标使用 --consume-success 时必须同时提供 --verify")
     if args.verify and (
@@ -2059,6 +2139,7 @@ def main() -> int:
         and args.out_dir is None
         and not args.cpa_auth_dir
         and not args.cpa_remote_url
+        and not args.cpa_controller_url
         and not args.grok2api_auth_dir
         and len(records) == 1
     ):
@@ -2124,7 +2205,7 @@ def main() -> int:
 
             cpa_record = None
             gate_passed = False
-            if args.cpa_auth_dir or args.cpa_remote_url:
+            if args.cpa_auth_dir or args.cpa_remote_url or args.cpa_controller_url:
                 cpa_record = token_to_cpa_record(token, email=email, sso=sso)
                 if args.verify:
                     provider = probe_cpa_record_verified(cpa_record, proxy=args.proxy, attempts=2)
@@ -2136,7 +2217,15 @@ def main() -> int:
                 if args.cpa_auth_dir:
                     cp = write_cpa_auth(Path(args.cpa_auth_dir), cpa_record)
                     print(f"  💾 CPA 本地 auth → {cp.name}")
-                if args.cpa_remote_url:
+                if args.cpa_controller_url:
+                    name = import_cpa_auth_controller(
+                        args.cpa_controller_url,
+                        args.cpa_controller_token,
+                        cpa_record,
+                        proxy=args.proxy,
+                    )
+                    print(f"  💾 控制器登记 auth → {name}")
+                elif args.cpa_remote_url:
                     name = upload_cpa_auth_remote(
                         args.cpa_remote_url,
                         args.cpa_management_key,
@@ -2144,6 +2233,7 @@ def main() -> int:
                         proxy=args.proxy,
                     )
                     print(f"  💾 CPA 远程 auth → {name}")
+                if args.cpa_remote_url:
                     if args.verify:
                         loaded = wait_cpa_auth_remote(
                             args.cpa_remote_url,

@@ -29,6 +29,8 @@
   "cpa_auth_dir": "cpa_auth",
   "cpa_remote_url": "",
   "cpa_management_key": "",
+  "cpa_controller_url": "",
+  "cpa_controller_token": "",
   "cpa_auto_verify": false,
   "cpa_verify_attempts": 2,
   "cpa_verify_timeout": 30,

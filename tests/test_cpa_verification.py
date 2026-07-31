@@ -99,6 +99,41 @@ def test_management_upload_and_hotload_contract():
     assert FakeRequests.get_kwargs["proxies"] == {}
 
 
+def test_controller_import_uses_tracked_contract_without_proxying_loopback():
+    record = {"email": "person@example.com", "access_token": "token"}
+
+    class FakeRequests:
+        post_kwargs = None
+
+        @classmethod
+        def post(cls, _url, **kwargs):
+            cls.post_kwargs = kwargs
+            return FakeResponse(
+                200,
+                {
+                    "auth_name": cpa.cpa_auth_filename(record),
+                    "account_id": "account-id",
+                    "credential_id": "credential-id",
+                },
+            )
+
+    original = cpa.requests
+    cpa.requests = FakeRequests
+    try:
+        name = cpa.import_cpa_auth_controller(
+            "http://127.0.0.1:9000",
+            "controller-token",
+            record,
+            proxy="socks5h://127.0.0.1:40000",
+        )
+    finally:
+        cpa.requests = original
+
+    assert name == "xai-person@example.com.json"
+    assert FakeRequests.post_kwargs["json"] == {"auth_name": name, "auth": record}
+    assert FakeRequests.post_kwargs["proxies"] == {}
+
+
 def test_provider_probe_rejects_generic_http_200():
     class FakeRequests:
         @staticmethod
@@ -194,6 +229,7 @@ def test_panel_state_machine_reaches_verified_only_after_all_gates():
             "write_cpa_auth",
             "write_grok2api_auth",
             "probe_cpa_record_verified",
+            "import_cpa_auth_controller",
             "upload_cpa_auth_remote",
             "wait_cpa_auth_remote",
             "probe_openai_data_plane",
@@ -213,6 +249,8 @@ def test_panel_state_machine_reaches_verified_only_after_all_gates():
                 "cpa_auth_dir": temp,
                 "cpa_remote_url": "http://127.0.0.1:8317",
                 "cpa_management_key": "management-key",
+                "cpa_controller_url": "http://127.0.0.1:9000",
+                "cpa_controller_token": "controller-token",
                 "cpa_data_plane_url": "https://api.example.test",
                 "cpa_data_plane_key": "api-key",
                 "cpa_data_plane_model": "model",
@@ -235,7 +273,12 @@ def test_panel_state_machine_reaches_verified_only_after_all_gates():
                 "summary": "response",
                 "attempts": 1,
             }
-            panel._s2cpa.upload_cpa_auth_remote = lambda *_args, **_kwargs: "xai-person.json"
+            panel._s2cpa.import_cpa_auth_controller = (
+                lambda *_args, **_kwargs: "xai-person.json"
+            )
+            panel._s2cpa.upload_cpa_auth_remote = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("controller-configured path must not upload directly")
+            )
             panel._s2cpa.wait_cpa_auth_remote = lambda *_args, **_kwargs: {
                 "ok": True,
                 "status_code": 200,
