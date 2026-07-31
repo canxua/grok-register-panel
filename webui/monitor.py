@@ -89,7 +89,7 @@ CONTROL_LOCK = threading.RLock()
 START_LOCK = threading.Lock()
 MAX_REQUEST_BODY = 64 * 1024
 
-RE_OK = re.compile(r"\[\+\] 注册成功")
+RE_OK = re.compile(r"\[\+\] 注册成功:")
 RE_FAIL = re.compile(r"\[-\] 失败")
 RE_DOMAIN = re.compile(r"\[-\] 域名拒绝")
 RE_SKIP = re.compile(r"\[-\] 卡住跳过")
@@ -310,7 +310,18 @@ def parse_log(path, max_tail=400_000):
             except Exception:
                 return 0
 
-        ok = gcount("注册成功")
+        def gcount_fixed(text):
+            r = subprocess.run(
+                ["grep", "-F", "-c", text, str(path)],
+                capture_output=True,
+                text=True,
+            )
+            try:
+                return int(r.stdout.strip() or 0)
+            except Exception:
+                return 0
+
+        ok = gcount_fixed("[+] 注册成功:")
         fail = gcount(r"\[-\] 失败")
         bot0 = gcount("botFlagSource=0")
         bot1 = gcount("botFlagSource=1")
@@ -346,6 +357,55 @@ def cpa_count():
             return sum(1 for _ in CPA_DIR.iterdir() if _.is_file())
         except Exception:
             return 0
+
+
+def credential_verification_stats(limit: int = 25) -> dict:
+    """Return the latest non-secret verification state for each credential."""
+    states_path = LOG_DIR / "cpa_states.jsonl"
+    latest = {}
+    by_state = {}
+    try:
+        if states_path.exists():
+            size = states_path.stat().st_size
+            with states_path.open("rb") as handle:
+                if size > 4_000_000:
+                    handle.seek(size - 4_000_000)
+                    handle.readline()
+                for index, line in enumerate(handle):
+                    try:
+                        item = json.loads(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        continue
+                    state = str(item.get("state") or "").strip()
+                    if not state:
+                        continue
+                    email = mask_email(str(item.get("email") or ""))
+                    credential_id = str(item.get("credential_id") or "").strip()
+                    key = credential_id or email or f"unknown-{index}"
+                    latest[key] = {
+                        "ts": str(item.get("ts") or ""),
+                        "email": email,
+                        "credential_id": credential_id,
+                        "state": state,
+                        "status_code": item.get("status_code"),
+                        "attempt": item.get("attempt"),
+                        "detail": redact_log_line(str(item.get("detail") or ""))[:160],
+                    }
+    except Exception:
+        latest = {}
+
+    rows = sorted(latest.values(), key=lambda item: item.get("ts") or "", reverse=True)
+    for item in rows:
+        state = item["state"]
+        by_state[state] = by_state.get(state, 0) + 1
+    verified = int(by_state.get("verified", 0))
+    return {
+        "total": len(rows),
+        "verified": verified,
+        "pending": max(len(rows) - verified, 0),
+        "by_state": by_state,
+        "recent": rows[: max(1, min(int(limit or 25), 100))],
+    }
 
 
 def read_blacklist():
@@ -412,6 +472,8 @@ def success_stats():
     base_stale = configured_base < 0 or configured_base > cpa
     base = cpa if base_stale else configured_base
     jsonl_ok = 0
+    jsonl_verified = 0
+    jsonl_legacy_ok = 0
     jsonl_risk = 0
     jsonl_fail = 0
     by_day = {}
@@ -458,6 +520,10 @@ def success_stats():
                         by_day.setdefault(day, {"ok": 0, "risk": 0, "fail": 0})
                     if st == "ok":
                         jsonl_ok += 1
+                        if o.get("state") == "verified":
+                            jsonl_verified += 1
+                        else:
+                            jsonl_legacy_ok += 1
                         if day:
                             by_day[day]["ok"] += 1
                     elif st == "risk":
@@ -516,6 +582,8 @@ def success_stats():
         "base_cpa_stale": base_stale,
         "cpa_delta": cpa - base,
         "jsonl_ok": jsonl_ok,
+        "jsonl_verified": jsonl_verified,
+        "jsonl_legacy_ok": jsonl_legacy_ok,
         "jsonl_risk": jsonl_risk,
         "jsonl_fail": jsonl_fail,
         "batch_ok": batch_ok,
@@ -716,8 +784,10 @@ def snapshot():
     bl = read_blacklist()
     bl_err = blacklist_update_errors()
     try:
-        rates = success_stats().get("rates") or {}
+        success_data = success_stats()
+        rates = success_data.get("rates") or {}
     except Exception:
+        success_data = {}
         rates = {}
     target = parsed.get("count_target") or control.get("batch_count") or 1
     ok = parsed.get("ok") or 0
@@ -762,6 +832,8 @@ def snapshot():
         },
         "blacklist_update": bl_err,
         "rates": rates,
+        "credential_verification": credential_verification_stats(),
+        "jsonl_verified": success_data.get("jsonl_verified", 0),
         **{k: v for k, v in parsed.items() if k != "tail"},
         "workers": workers_show,
         "tail": (parsed.get("tail") or []) if PANEL_INCLUDE_TAIL else ["(raw log tail disabled; set PANEL_INCLUDE_TAIL=1)"],
@@ -2337,6 +2409,7 @@ function renderStats(s) {
   document.getElementById("stats-chips").innerHTML = [
     ["CPA", s.cpa ?? "--", "accent"],
     ["CPA 变化", s.cpa_delta ?? "--", "ok"],
+    ["四门禁验证", s.jsonl_verified ?? 0, "ok"],
     ["本批成功", s.batch_ok ?? 0, "ok"],
     ["本批失败", s.batch_fail ?? 0, "fail"],
     ["jsonl ok", s.jsonl_ok ?? 0, "ok"],
@@ -2373,6 +2446,7 @@ function render(d) {
     ["本批成功", d.ok ?? 0, "ok", "目标 " + (d.target ?? "--")],
     ["本批失败", d.fail ?? 0, "fail", d.success_rate != null ? "成功率 " + d.success_rate + "%" : "暂无数据"],
     ["CPA 总量", d.cpa ?? "--", "accent", "较基线 " + (d.cpa_delta != null ? ((Number(d.cpa_delta) >= 0 ? "+" : "") + d.cpa_delta) : "--")],
+    ["四门禁已验证", (d.credential_verification && d.credential_verification.verified) ?? 0, "ok", "待验证 " + ((d.credential_verification && d.credential_verification.pending) ?? 0)],
     ["正常 / 风控", (d.bot0 ?? 0) + " / " + (d.bot1 ?? 0), (d.bot1 ?? 0) > 0 ? "warn" : "ok", "注册结果采样"],
     ["黑名单 ASN", (d.blacklist && d.blacklist.count) ?? "--", "accent", "更新错误 " + ((d.blacklist_update && d.blacklist_update.error_count) ?? 0)],
     ["预计完成", d.ended ? "已完成" : (d.eta || "--"), "", "并发 " + (d.workers ?? "--") + (d.rate_per_min != null ? " / " + d.rate_per_min + " 每分钟" : "")],
@@ -2396,7 +2470,7 @@ function render(d) {
   renderStats({
     cpa: d.cpa, cpa_delta: d.cpa_delta, base_cpa: d.base_cpa,
     batch_ok: d.ok, batch_fail: d.fail,
-    jsonl_ok: "--", jsonl_risk: "--",
+    jsonl_ok: "--", jsonl_risk: "--", jsonl_verified: d.jsonl_verified ?? 0,
     by_day: {}, refreshed_at: d.ts_human,
   });
 

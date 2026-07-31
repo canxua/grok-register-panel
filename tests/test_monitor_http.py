@@ -45,6 +45,55 @@ def test_control_defaults_are_single_account_batch():
         monitor.CONTROL_FILE = previous
 
 
+def test_log_success_excludes_unverified_cpa_result():
+    with tempfile.TemporaryDirectory() as temp:
+        log_path = Path(temp) / "batch.log"
+        log_path.write_text(
+            "[12:00:00] [+] 注册成功: good@example.com\n"
+            "[12:01:00] [+] 注册成功（SSO 已保存，CPA 入库失败）: pending@example.com\n",
+            encoding="utf-8",
+        )
+        parsed = monitor.parse_log(log_path)
+        assert parsed["ok"] == 1
+        assert len(parsed["recent_ok"]) == 1
+
+
+def test_credential_verification_uses_latest_state_per_fingerprint():
+    previous = monitor.LOG_DIR
+    try:
+        with tempfile.TemporaryDirectory() as temp:
+            monitor.LOG_DIR = Path(temp)
+            (monitor.LOG_DIR / "cpa_states.jsonl").write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-07-31T01:00:00Z",
+                        "email": "pe***@example.com",
+                        "credential_id": "cred-a",
+                        "state": "pool_loaded",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "ts": "2026-07-31T01:01:00Z",
+                        "email": "pe***@example.com",
+                        "credential_id": "cred-a",
+                        "state": "verified",
+                        "status_code": 200,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stats = monitor.credential_verification_stats()
+            assert stats["total"] == 1
+            assert stats["verified"] == 1
+            assert stats["pending"] == 0
+            assert stats["recent"][0]["credential_id"] == "cred-a"
+    finally:
+        monitor.LOG_DIR = previous
+
+
 def request(url: str, *, token: str = "", method: str = "GET", body: bytes | None = None):
     headers = {}
     if token:
@@ -216,6 +265,8 @@ def test_non_loopback_requires_token():
 
 if __name__ == "__main__":
     test_control_defaults_are_single_account_batch()
+    test_log_success_excludes_unverified_cpa_result()
+    test_credential_verification_uses_latest_state_per_fingerprint()
     test_monitor_http_auth_and_headers()
     test_proxy_api_auth_mutations_and_redaction()
     test_non_loopback_requires_token()

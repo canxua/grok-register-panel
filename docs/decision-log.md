@@ -12,3 +12,4 @@ Format: `- **YYYY-MM-DD** - Decision description. See <issue-ref>.`
 - **2026-07-31** - Keep registration in manual one-account batch mode until proxy leases and the verified success state machine are implemented. See `CURRENT_STATE.md`.
 - **2026-07-31** - Treat controller `ACTIVE`, CLIProxy auth file count, and exact per-auth verification as separate metrics. See `CURRENT_STATE.md`.
 - **2026-07-31** - Adopt `craigcossairt/trellis` v1.1.0 with Codex/Grok adapters and a local project brain; preserve existing project docs and code. See `TRELLIS.md`.
+- **2026-07-31** - Inject only the required CLIProxy management and New API client keys through a dedicated mode-`0600` panel bridge env; do not load the controller's database-bearing secret file. See `CURRENT_STATE.md`.

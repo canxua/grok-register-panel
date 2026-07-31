@@ -260,7 +260,7 @@ flowchart LR
 | Chrome 指纹预检 + Camoufox | 已完成 | 保持与正式 worker 相同出口 |
 | 单账号 Device Flow + 数据面验收 | 已完成 1 次人工 canary | 将数据面探针自动化为终态，不以文件数量代替健康度 |
 | 安全控制台、loopback、Token、0600 | 已完成 | 可选接入 tailnet 或额外身份网关 |
-| 新 panel auth 进入现有 CLIProxy 数据面 | 未完成 | 通过 loopback Management API 上传，确认热加载后从现有 API 路径探测 |
+| 新 panel auth 进入现有 CLIProxy 数据面 | 本地代码完成，生产未验证 | 通过 loopback Management API 上传，确认热加载后从现有 API 路径探测 |
 | 旧补号组件收敛 | 未完成 | 旧 5 容器约 155 MiB；auth 桥验收后先停 worker/browser/mail，controller 最后处理 |
 | 旧文件代理轮换 | 部分完成 | 当前凭据 `407`，不能用于生产扩容 |
 | 健康感知代理池与冷却 | 当前部署未完成 | 兼容合并上游 PR #6 的 `webui/proxy_store.py` |

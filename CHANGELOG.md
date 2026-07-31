@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add a feature-flagged CPA publication state machine with exact-token provider
+  verification, Management API upload, hot-load confirmation, and a strict
+  OpenAI-compatible data-plane probe.
+- Persist masked per-credential verification transitions and count only
+  `verified` as success when the gate is enabled.
 - Supervise headless batches and automatically resume remaining task slots after a Playwright/Camoufox driver crash or stall.
 - Persist batch slot progress atomically so completed accounts are not repeated during recovery.
 

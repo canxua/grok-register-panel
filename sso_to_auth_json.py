@@ -1278,21 +1278,101 @@ def cpa_auth_filename(record: dict) -> str:
     return f"{fname}.json"
 
 
-def probe_cpa_record(
+def cpa_auth_payload(record: dict) -> bytes:
+    """Return the exact byte payload used by the Management API upload."""
+    return json.dumps(record, ensure_ascii=False).encode("utf-8")
+
+
+def _management_auth_files_url(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if base.endswith("/v0/management/auth-files"):
+        return base
+    if base.endswith("/v0/management"):
+        return f"{base}/auth-files"
+    return f"{base}/v0/management/auth-files"
+
+
+def _request_proxies(url: str, proxy: str):
+    host = (urllib.parse.urlparse(str(url or "")).hostname or "").lower()
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return {}
+    return {"http": proxy, "https": proxy} if proxy else None
+
+
+def _response_summary(resp, limit: int = 300) -> str:
+    text = str(getattr(resp, "text", "") or "").replace("\n", " ").strip()
+    return text[:limit]
+
+
+def _response_json(resp) -> dict | None:
+    try:
+        payload = resp.json()
+    except Exception:
+        try:
+            payload = json.loads(str(getattr(resp, "text", "") or ""))
+        except Exception:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def is_responses_success_payload(payload: dict | None) -> bool:
+    """Reject generic HTTP-200 wrappers that do not prove a model response."""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return False
+    response_id = str(payload.get("id") or "").strip()
+    if not response_id:
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"failed", "cancelled", "incomplete"}:
+        return False
+    return isinstance(payload.get("output"), list) or isinstance(
+        payload.get("output_text"), str
+    )
+
+
+def is_chat_completion_success_payload(payload: dict | None) -> bool:
+    """Validate an OpenAI-compatible chat completion, not merely JSON 200."""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return False
+    response_id = str(payload.get("id") or "").strip()
+    choices = payload.get("choices")
+    return bool(response_id and isinstance(choices, list) and choices)
+
+
+def _probe_failure_kind(status_code: int | None, summary: str) -> str:
+    low = str(summary or "").lower()
+    if status_code in (401, 403) or any(
+        marker in low
+        for marker in ("access denied", "invalid token", "invalid_token", "invalid grant")
+    ):
+        return "provider_denied"
+    if status_code is None or status_code == 429 or (status_code and status_code >= 500):
+        return "transient"
+    return "invalid_response"
+
+
+def probe_cpa_record_verified(
     record: dict,
     proxy: str = "",
     timeout: int = 30,
     model: str = CPA_PROBE_MODEL,
-) -> tuple[int | None, str]:
-    """直连 CLI chat proxy 自测，返回 (HTTP 状态码, 响应摘要)。"""
+    attempts: int = 2,
+) -> dict:
+    """Verify this exact access token against the provider with bounded retries."""
     access = str(record.get("access_token") or "").strip()
     if not access:
-        return None, "missing access_token"
+        return {
+            "ok": False,
+            "status_code": None,
+            "summary": "missing access_token",
+            "failure_kind": "provider_denied",
+            "attempts": 0,
+        }
 
     headers = dict(record.get("headers") or {})
     headers["Authorization"] = f"Bearer {access}"
     headers["Content-Type"] = "application/json"
-    kwargs = {
+    request_kwargs = {
         "headers": headers,
         "json": {
             "model": model,
@@ -1304,13 +1384,60 @@ def probe_cpa_record(
         "timeout": timeout,
     }
     if proxy:
-        kwargs["proxy"] = proxy
-    try:
-        resp = requests.post(CPA_PROBE_URL, **kwargs)
-        summary = str(resp.text or "").replace("\n", " ").strip()
-        return int(resp.status_code), summary[:300]
-    except Exception as exc:
-        return None, str(exc)[:300]
+        request_kwargs["proxy"] = proxy
+
+    total_attempts = max(1, min(int(attempts or 1), 3))
+    last = {
+        "ok": False,
+        "status_code": None,
+        "summary": "provider probe not attempted",
+        "failure_kind": "transient",
+        "attempts": 0,
+    }
+    for attempt in range(1, total_attempts + 1):
+        try:
+            resp = requests.post(CPA_PROBE_URL, **request_kwargs)
+            status_code = int(resp.status_code)
+            summary = _response_summary(resp)
+            payload = _response_json(resp)
+            ok = 200 <= status_code < 300 and is_responses_success_payload(payload)
+            last = {
+                "ok": ok,
+                "status_code": status_code,
+                "summary": summary,
+                "failure_kind": "" if ok else _probe_failure_kind(status_code, summary),
+                "attempts": attempt,
+            }
+        except Exception as exc:
+            last = {
+                "ok": False,
+                "status_code": None,
+                "summary": str(exc)[:300],
+                "failure_kind": "transient",
+                "attempts": attempt,
+            }
+        if last["ok"] or last["failure_kind"] != "transient":
+            break
+        if attempt < total_attempts:
+            time.sleep(1 if attempt == 1 else 5)
+    return last
+
+
+def probe_cpa_record(
+    record: dict,
+    proxy: str = "",
+    timeout: int = 30,
+    model: str = CPA_PROBE_MODEL,
+) -> tuple[int | None, str]:
+    """直连 CLI chat proxy 自测，返回 (HTTP 状态码, 响应摘要)。"""
+    result = probe_cpa_record_verified(
+        record,
+        proxy=proxy,
+        timeout=timeout,
+        model=model,
+        attempts=1,
+    )
+    return result["status_code"], result["summary"]
 
 
 def write_cpa_auth(auth_dir: Path, record: dict) -> Path:
@@ -1370,8 +1497,9 @@ def upload_cpa_auth_remote(
         raise ValueError("cpa_management_key 为空")
 
     name = cpa_auth_filename(record)
-    url = f"{base}/v0/management/auth-files"
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+    url = _management_auth_files_url(base)
+    proxies = _request_proxies(url, proxy)
+    payload = cpa_auth_payload(record)
     resp = requests.post(
         url,
         params={"name": name},
@@ -1379,7 +1507,7 @@ def upload_cpa_auth_remote(
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         },
-        data=json.dumps(record, ensure_ascii=False).encode("utf-8"),
+        data=payload,
         timeout=timeout,
         proxies=proxies,
         impersonate="chrome",
@@ -1389,7 +1517,170 @@ def upload_cpa_auth_remote(
         if len(body) > 300:
             body = body[:300] + "..."
         raise RuntimeError(f"远程上传失败 HTTP {resp.status_code}: {body or resp.reason}")
+    response_payload = _response_json(resp)
+    if not response_payload or response_payload.get("status") != "ok":
+        raise RuntimeError(
+            f"远程上传响应无效 HTTP {resp.status_code}: {_response_summary(resp) or 'empty response'}"
+        )
     return name
+
+
+def wait_cpa_auth_remote(
+    base_url: str,
+    management_key: str,
+    name: str,
+    *,
+    expected_size: int | None = None,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    proxy: str = "",
+) -> dict:
+    """Poll the Management API until the uploaded file is active and visible."""
+    base = str(base_url or "").strip().rstrip("/")
+    key = str(management_key or "").strip()
+    target = str(name or "").strip()
+    if not base or not key or not target:
+        raise ValueError("CPA 热加载检查缺少 URL、管理密钥或文件名")
+
+    url = _management_auth_files_url(base)
+    proxies = _request_proxies(url, proxy)
+    deadline = time.monotonic() + max(1, int(timeout or 1))
+    last_summary = "auth file not visible"
+    last_status = None
+    while time.monotonic() <= deadline:
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=min(10, max(1, int(timeout or 1))),
+                proxies=proxies,
+                impersonate="chrome",
+            )
+            last_status = int(resp.status_code)
+            last_summary = _response_summary(resp)
+            if last_status in (401, 403):
+                break
+            payload = _response_json(resp)
+            files = payload.get("files") if payload else None
+            if 200 <= last_status < 300 and isinstance(files, list):
+                for entry in files:
+                    if not isinstance(entry, dict) or entry.get("name") != target:
+                        continue
+                    actual_size = entry.get("size")
+                    if expected_size is not None:
+                        try:
+                            if int(actual_size) != int(expected_size):
+                                last_summary = "auth file visible but payload size is stale"
+                                continue
+                        except (TypeError, ValueError):
+                            last_summary = "auth file visible without payload size"
+                            continue
+                    if entry.get("disabled") or entry.get("unavailable"):
+                        last_summary = "auth file visible but disabled or unavailable"
+                        continue
+                    return {
+                        "ok": True,
+                        "status_code": last_status,
+                        "name": target,
+                        "size": actual_size,
+                        "source": str(entry.get("source") or ""),
+                        "summary": "auth file loaded",
+                    }
+        except Exception as exc:
+            last_status = None
+            last_summary = str(exc)[:300]
+        if time.monotonic() <= deadline:
+            time.sleep(max(0.1, min(float(poll_interval or 1.0), 5.0)))
+    return {
+        "ok": False,
+        "status_code": last_status,
+        "name": target,
+        "summary": last_summary[:300],
+    }
+
+
+def _chat_completions_url(base_url: str) -> str:
+    url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if url.endswith("/v1/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return f"{url}/v1/chat/completions"
+
+
+def probe_openai_data_plane(
+    base_url: str,
+    api_key: str,
+    model: str,
+    *,
+    timeout: int = 30,
+    attempts: int = 2,
+) -> dict:
+    """Probe the operator-facing OpenAI-compatible route with strict semantics."""
+    url = _chat_completions_url(base_url)
+    key = str(api_key or "").strip()
+    model_name = str(model or "").strip()
+    if not url or not key or not model_name:
+        return {
+            "ok": False,
+            "status_code": None,
+            "summary": "missing data-plane URL, API key, or model",
+            "failure_kind": "configuration",
+            "attempts": 0,
+        }
+
+    total_attempts = max(1, min(int(attempts or 1), 3))
+    last = {
+        "ok": False,
+        "status_code": None,
+        "summary": "data-plane probe not attempted",
+        "failure_kind": "transient",
+        "attempts": 0,
+    }
+    for attempt in range(1, total_attempts + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 2,
+                    "stream": False,
+                },
+                timeout=timeout,
+                impersonate="chrome",
+            )
+            status_code = int(resp.status_code)
+            summary = _response_summary(resp)
+            payload = _response_json(resp)
+            ok = 200 <= status_code < 300 and is_chat_completion_success_payload(payload)
+            transient = status_code == 429 or status_code >= 500
+            last = {
+                "ok": ok,
+                "status_code": status_code,
+                "summary": summary,
+                "failure_kind": "" if ok else ("transient" if transient else "invalid_response"),
+                "attempts": attempt,
+            }
+        except Exception as exc:
+            last = {
+                "ok": False,
+                "status_code": None,
+                "summary": str(exc)[:300],
+                "failure_kind": "transient",
+                "attempts": attempt,
+            }
+        if last["ok"] or last["failure_kind"] != "transient":
+            break
+        if attempt < total_attempts:
+            time.sleep(1 if attempt == 1 else 5)
+    return last
 
 
 def write_auth_json(path: Path, auth_key: str, entry: dict) -> None:
@@ -1548,6 +1839,25 @@ def _resolve_config_path(base: Path, value: object) -> str:
 
 def apply_config_defaults(args) -> None:
     if not args.from_config:
+        args.cpa_remote_url = args.cpa_remote_url or str(
+            os.environ.get("CPA_REMOTE_URL") or os.environ.get("CLIPROXY_MANAGEMENT_URL") or ""
+        ).strip()
+        args.cpa_management_key = args.cpa_management_key or str(
+            os.environ.get("CPA_MANAGEMENT_KEY")
+            or os.environ.get("CLIPROXY_MANAGEMENT_KEY")
+            or ""
+        ).strip()
+        args.cpa_data_plane_url = args.cpa_data_plane_url or str(
+            os.environ.get("CPA_DATA_PLANE_URL") or ""
+        ).strip()
+        args.cpa_data_plane_key = args.cpa_data_plane_key or str(
+            os.environ.get("CPA_DATA_PLANE_KEY")
+            or os.environ.get("CLIPROXY_API_KEY")
+            or ""
+        ).strip()
+        args.cpa_data_plane_model = args.cpa_data_plane_model or str(
+            os.environ.get("CPA_DATA_PLANE_MODEL") or ""
+        ).strip()
         args.prefer = args.prefer or "device"
         return
     config_path = Path(args.from_config).expanduser().resolve()
@@ -1557,8 +1867,30 @@ def apply_config_defaults(args) -> None:
         args.cpa_auth_dir = _resolve_config_path(base, config.get("cpa_auth_dir"))
     if not args.grok2api_auth_dir:
         args.grok2api_auth_dir = _resolve_config_path(base, config.get("grok2api_auth_dir"))
-    args.cpa_remote_url = args.cpa_remote_url or str(config.get("cpa_remote_url") or "").strip()
-    args.cpa_management_key = args.cpa_management_key or str(config.get("cpa_management_key") or "").strip()
+    args.cpa_remote_url = args.cpa_remote_url or str(
+        os.environ.get("CPA_REMOTE_URL")
+        or os.environ.get("CLIPROXY_MANAGEMENT_URL")
+        or config.get("cpa_remote_url")
+        or ""
+    ).strip()
+    args.cpa_management_key = args.cpa_management_key or str(
+        os.environ.get("CPA_MANAGEMENT_KEY")
+        or os.environ.get("CLIPROXY_MANAGEMENT_KEY")
+        or config.get("cpa_management_key")
+        or ""
+    ).strip()
+    args.cpa_data_plane_url = args.cpa_data_plane_url or str(
+        config.get("cpa_data_plane_url") or os.environ.get("CPA_DATA_PLANE_URL") or ""
+    ).strip()
+    args.cpa_data_plane_key = args.cpa_data_plane_key or str(
+        config.get("cpa_data_plane_key")
+        or os.environ.get("CPA_DATA_PLANE_KEY")
+        or os.environ.get("CLIPROXY_API_KEY")
+        or ""
+    ).strip()
+    args.cpa_data_plane_model = args.cpa_data_plane_model or str(
+        config.get("cpa_data_plane_model") or os.environ.get("CPA_DATA_PLANE_MODEL") or ""
+    ).strip()
     args.proxy = args.proxy or str(config.get("proxy") or "").strip()
     if not args.prefer:
         mode = str(config.get("cpa_token_mode") or "device_protocol")
@@ -1654,6 +1986,14 @@ def main() -> int:
         action="store_true",
         help="禁用换 token 回退（仅用 --prefer 指定路径）",
     )
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="完成精确 provider、Management API 热加载和公网数据面四门禁后才算成功",
+    )
+    ap.add_argument("--cpa-data-plane-url", default="", help="公网 OpenAI 兼容入口根地址或完整路径")
+    ap.add_argument("--cpa-data-plane-key", default="", help="公网数据面 API key")
+    ap.add_argument("--cpa-data-plane-model", default="", help="公网数据面金丝雀模型")
     ap.add_argument("--proxy", default="", help="OAuth 请求走代理，如 http://127.0.0.1:7890")
     ap.add_argument("--consume-success", action="store_true", help="成功后从 --sso 队列原子移除对应记录")
     ap.add_argument("--report-json", default=None, help="写入不含 token 的运行摘要 JSON")
@@ -1676,6 +2016,17 @@ def main() -> int:
         ap.error("使用 --cpa-remote-url 时必须同时提供 --cpa-management-key")
     if args.cpa_management_key and not args.cpa_remote_url:
         ap.error("使用 --cpa-management-key 时必须同时提供 --cpa-remote-url")
+    has_cpa_target = bool(args.cpa_auth_dir or args.cpa_remote_url or args.grok2api_auth_dir)
+    if args.consume_success and has_cpa_target and not args.verify:
+        ap.error("CPA 目标使用 --consume-success 时必须同时提供 --verify")
+    if args.verify and (
+        not args.cpa_remote_url
+        or not args.cpa_management_key
+        or not args.cpa_data_plane_url
+        or not args.cpa_data_plane_key
+        or not args.cpa_data_plane_model
+    ):
+        ap.error("--verify 需要 CPA 远程地址、管理密钥、数据面 URL/key/model")
 
     input_count = len(records)
     existing_emails = existing_cpa_emails(args.cpa_auth_dir)
@@ -1684,12 +2035,14 @@ def main() -> int:
         for record in records
         if record.email and record.email.strip().lower() in existing_emails
     ]
-    if already_present:
+    if already_present and not args.verify:
         existing_ssos = {record.sso for record in already_present}
         records = [record for record in records if record.sso not in existing_ssos]
         if args.consume_success and args.sso:
             consume_successful_records(args.sso, existing_ssos)
         print(f"跳过已存在 CPA 的记录: {len(already_present)}")
+    elif args.verify:
+        already_present = []
 
     if should_create_default_out_dir(args, len(records)):
         args.out_dir = "./auth_out"
@@ -1709,7 +2062,7 @@ def main() -> int:
     args.prefer = args.prefer or "device"
     print(
         f"🚀 SSO → auth.json: {len(records)} 个待处理, delay={args.delay}s, "
-        f"prefer={args.prefer}, fallback={not args.no_fallback}"
+        f"prefer={args.prefer}, fallback={not args.no_fallback}, verify={args.verify}"
     )
     ok = 0
     fail = 0
@@ -1762,13 +2115,22 @@ def main() -> int:
 
             if args.grok2api_auth_dir:
                 gp = write_grok2api_auth(Path(args.grok2api_auth_dir), token, email=email)
-                print(f"  💾 Grok2API → {gp}")
+                print(f"  💾 Grok2API auth → {gp.name}")
 
+            cpa_record = None
+            gate_passed = False
             if args.cpa_auth_dir or args.cpa_remote_url:
                 cpa_record = token_to_cpa_record(token, email=email, sso=sso)
+                if args.verify:
+                    provider = probe_cpa_record_verified(cpa_record, proxy=args.proxy, attempts=2)
+                    if not provider.get("ok"):
+                        raise RuntimeError(
+                            f"provider verification failed HTTP={provider.get('status_code') or '-'} "
+                            f"{provider.get('failure_kind') or 'invalid_response'}"
+                        )
                 if args.cpa_auth_dir:
                     cp = write_cpa_auth(Path(args.cpa_auth_dir), cpa_record)
-                    print(f"  💾 CPA 本地 → {cp}")
+                    print(f"  💾 CPA 本地 auth → {cp.name}")
                 if args.cpa_remote_url:
                     name = upload_cpa_auth_remote(
                         args.cpa_remote_url,
@@ -1776,13 +2138,41 @@ def main() -> int:
                         cpa_record,
                         proxy=args.proxy,
                     )
-                    print(f"  💾 CPA 远程 → {args.cpa_remote_url.rstrip('/')}/.../{name}")
+                    print(f"  💾 CPA 远程 auth → {name}")
+                    if args.verify:
+                        loaded = wait_cpa_auth_remote(
+                            args.cpa_remote_url,
+                            args.cpa_management_key,
+                            name,
+                            expected_size=len(cpa_auth_payload(cpa_record)),
+                            timeout=30,
+                            proxy=args.proxy,
+                        )
+                        if not loaded.get("ok"):
+                            raise RuntimeError(
+                                f"CPA hot-load verification failed HTTP={loaded.get('status_code') or '-'}"
+                            )
+                        data_plane = probe_openai_data_plane(
+                            args.cpa_data_plane_url,
+                            args.cpa_data_plane_key,
+                            args.cpa_data_plane_model,
+                            attempts=2,
+                        )
+                        if not data_plane.get("ok"):
+                            raise RuntimeError(
+                                f"data-plane verification failed HTTP={data_plane.get('status_code') or '-'}"
+                            )
+                        gate_passed = True
+
+            if args.verify and not gate_passed:
+                raise RuntimeError("verification requires a CPA auth target")
 
             ok += 1
             succeeded_ssos.add(sso)
-            if args.consume_success and args.sso:
-                consume_successful_records(args.sso, {sso})
-            print(f"  ✅ [{i}] 完成 user_id={uid[:12]}...")
+            if args.verify:
+                print(f"  ✅ [{i}] verified user_id={uid[:12]}...")
+            else:
+                print(f"  ◇ [{i}] 已写出但未执行 verified 门禁 user_id={uid[:12]}...")
         except Exception as e:
             fail += 1
             try:
@@ -1807,6 +2197,9 @@ def main() -> int:
         "input_count": input_count,
         "skipped_existing_count": len(already_present),
         "success_count": ok,
+        "verified_count": ok if args.verify else 0,
+        "legacy_unverified_count": 0 if args.verify else ok,
+        "verification_enabled": bool(args.verify),
         "failure_count": fail,
         "remaining_count": remaining,
         "failures": failures,

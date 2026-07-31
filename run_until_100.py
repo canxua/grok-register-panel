@@ -60,7 +60,7 @@ def apply_control() -> None:
     if add_count is not None and str(add_count).strip() != "":
         try:
             n = max(1, int(add_count))
-            now = len(list(AUTHS.glob("xai-*.json")))
+            now = cpa_count()
             BASE0 = now
             TARGET_CPA = now + n
             return
@@ -88,6 +88,27 @@ def log(msg: str) -> None:
 
 
 def cpa_count() -> int:
+    if str(os.environ.get("CPA_AUTO_VERIFY", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        verified = set()
+        try:
+            with RESULTS.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    if item.get("status") == "ok" and item.get("state") == "verified":
+                        key = str(item.get("credential_id") or item.get("email") or "").strip()
+                        if key:
+                            verified.add(key)
+        except FileNotFoundError:
+            pass
+        return len(verified)
     return len(list(AUTHS.glob("xai-*.json")))
 
 

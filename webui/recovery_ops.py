@@ -42,6 +42,20 @@ VENV_PY = ROOT / ".venv" / "bin" / "python"
 CONFIG_FILE = ROOT / "config.json"
 
 
+def _verification_enabled() -> bool:
+    raw = os.environ.get("CPA_AUTO_VERIFY")
+    if raw is None:
+        try:
+            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8")).get(
+                "cpa_auto_verify", False
+            )
+        except Exception:
+            raw = False
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_line(line: str) -> tuple[str, str] | None:
     raw = str(line or "").strip()
     if not raw or raw.startswith("#"):
@@ -141,6 +155,9 @@ def _read_report() -> dict:
         "input_count": int(report.get("input_count") or 0),
         "skipped_existing_count": int(report.get("skipped_existing_count") or 0),
         "success_count": int(report.get("success_count") or 0),
+        "verified_count": int(report.get("verified_count") or 0),
+        "legacy_unverified_count": int(report.get("legacy_unverified_count") or 0),
+        "verification_enabled": bool(report.get("verification_enabled")),
         "failure_count": int(report.get("failure_count") or 0),
         "remaining_count": report.get("remaining_count"),
         "failures": failures[:20],
@@ -151,10 +168,15 @@ def recovery_status() -> dict:
     pending = _records_from_file(PENDING_FILE)
     all_records = _account_records()
     cpa_emails = _cpa_emails()
-    recoverable = sum(
-        1
-        for email in all_records.values()
-        if not email or email not in cpa_emails
+    verification_enabled = _verification_enabled()
+    recoverable = (
+        len(all_records)
+        if verification_enabled
+        else sum(
+            1
+            for email in all_records.values()
+            if not email or email not in cpa_emails
+        )
     )
     jobs = find_managed_processes(ROOT, ("sso_to_auth_json.py",))
     return {
@@ -165,6 +187,7 @@ def recovery_status() -> dict:
         "account_record_count": len(all_records),
         "recoverable_count": recoverable,
         "risk_rejected_count": _nonempty_line_count(RISK_FILE),
+        "verification_enabled": verification_enabled,
         "last_report": _read_report(),
     }
 
@@ -187,6 +210,12 @@ def start_recovery(scope: str = "pending") -> dict:
     count = status["pending_count"] if normalized_scope == "pending" else status["recoverable_count"]
     if count <= 0:
         return {"ok": False, "error": "no recoverable records", "status": status}
+    if normalized_scope == "pending" and not status["verification_enabled"]:
+        return {
+            "ok": False,
+            "error": "pending recovery requires CPA_AUTO_VERIFY=1",
+            "status": status,
+        }
 
     ensure_private_dir(LOG_DIR)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -206,6 +235,8 @@ def start_recovery(scope: str = "pending") -> dict:
         "--report-json",
         str(REPORT_FILE),
     ]
+    if status["verification_enabled"]:
+        command.append("--verify")
     if normalized_scope == "pending":
         command.extend(("--sso", str(PENDING_FILE), "--consume-success"))
     else:

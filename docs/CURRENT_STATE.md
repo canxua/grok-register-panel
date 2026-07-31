@@ -6,7 +6,7 @@ architecture documents.
 
 ## Snapshot
 
-- **Verified at:** 2026-07-31 12:42 Asia/Shanghai
+- **Verified at:** 2026-07-31 21:47 Asia/Shanghai
 - **Local repository:** `/Users/jack/project/github/grok-register-panel`
 - **Remote register panel:** `/opt/grok-register-panel` on the OVH host
 - **Remote AI stack:** `/opt/ai-stack` on the same OVH host
@@ -40,6 +40,16 @@ architecture documents.
 7. CLIProxy had 102 JSON files in its PostgreSQL-backed auth directory at the
    same audit point. File count, controller `ACTIVE` count, and independently
    verified credentials are deliberately different metrics.
+8. The local branch now implements the feature-flagged four-gate publication
+   state machine and passes the full release suite. It has not yet been deployed
+   to OVH, so this is an implementation fact rather than a production success.
+9. Live contract probes returned `200` from CLIProxy `/v1/models`, public New API
+   `/v1/models`, and a minimal public `grok-4.5` chat completion with standard
+   `id` and `choices` fields.
+10. The management key in `cliproxy-client.env` returned `401`; the distinct key
+    in root-owned `pool-controller.env` returned `200` and listed 102 auth files.
+    Deployment must copy only the required values into a dedicated mode-`0600`
+    panel bridge env, not load the whole controller secret file.
 
 ## Current Operating Mode
 
@@ -52,15 +62,15 @@ architecture documents.
 
 ## Open Work In Priority Order
 
-1. Build the new-panel-to-CLIProxy auth bridge using the loopback Management API
-   and a `0600` secret.
-2. Add the real success state machine: exact credential probe, upload, hot-load
-   confirmation, and public data-plane probe before `verified`.
+1. Deploy the tested bridge code and a dedicated `0600` bridge env to OVH, keep
+   `CPA_AUTO_VERIFY=0`, then enable it only for one controlled account canary.
+2. Prove one production transition through exact provider verification, upload,
+   hot-load confirmation, public data-plane response, and final `verified`.
 3. Add a per-credential quota view. CLIProxyAPI v7.2.80 exposes auth health and
    request statistics but not provider quota windows natively. Evaluate
    CLIProxy Quota Tray first; keep provider-reported windows separate from local
    token/cost estimates.
-4. Merge the upstream managed proxy pool after valid provider credentials are
+4. Operate the merged managed proxy pool after valid provider credentials are
    available, retaining one-account sticky sessions and fail-closed behavior.
 5. Add SQLite task/account/proxy leases before increasing concurrency.
 

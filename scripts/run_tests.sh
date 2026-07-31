@@ -14,6 +14,7 @@ tests=(
   tests/test_headless_import.py
   tests/test_runtime_security.py
   tests/test_sso_recovery.py
+  tests/test_cpa_verification.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py

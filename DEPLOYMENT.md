@@ -36,6 +36,13 @@ chmod 600 config.json
 - `cpa_auth_dir`
 - `grok2api_auth_dir`
 - 可选的 `cpa_remote_url` 与 `cpa_management_key`
+- 单账号验证使用 `cpa_auto_verify=false` 默认开关，以及数据面 URL、key、model
+
+`cpa_auto_verify=true` 时，账号依次通过精确 provider 请求、Management API 上传、
+auth-files 热加载确认和公网 OpenAI 兼容请求。任一步失败只写入 `pending`，不会计入
+自动成功。密钥优先通过 `CPA_MANAGEMENT_KEY` / `CPA_DATA_PLANE_KEY` 环境变量提供，
+也兼容现有 AI Stack 的 `CLIPROXY_MANAGEMENT_KEY` / `CLIPROXY_API_KEY`；不要把真实值
+提交到 `config.json`。
 
 代理池与 sticky 文件均属于凭据材料。运行权限脚本会将 `proxies*.txt`、
 `stickies*.txt`、缓存文件及 `.env.monitor` 收紧为 `0600`。
@@ -74,6 +81,7 @@ export MONITOR_HOST=127.0.0.1
 export MONITOR_PORT=8787
 export PANEL_INCLUDE_TAIL=0
 export CPA_AUTH_DIR="$PWD/cpa_auth"
+export CPA_AUTO_VERIFY=0
 # 可选：覆盖代理池状态位置与冷却时间
 # export PROXY_POOL_STATE_FILE="$PWD/log/proxy_pool.json"
 # export PROXY_NETWORK_COOLDOWN_SECONDS=90
@@ -103,6 +111,7 @@ sudo systemctl enable --now grok-register-panel.service
 - 绑定具体 loopback、LAN 或 Tailscale IP
 - `MONITOR_TOKEN` 使用至少 32 字节随机值
 - `Restart=on-failure`
+- Management API 使用 loopback 地址，密钥来自 mode `0600` 的 `EnvironmentFile`
 
 验证：
 
@@ -114,6 +123,14 @@ curl -H "Authorization: Bearer $MONITOR_TOKEN" http://目标地址:8787/api/stat
 ```
 
 第二条状态接口在未带 Token 时应返回 `401`。
+
+同机接入 CLIProxy 时，先保持 `CPA_AUTO_VERIFY=0`，再为 systemd 增加一个仅 root 可读
+的 secret EnvironmentFile。单账号金丝雀前切到 `CPA_AUTO_VERIFY=1`，并确认：
+
+1. `log/cpa_states.jsonl` 依次出现 `provider_verified`、`pool_uploaded`、
+   `pool_loaded`、`data_plane_verifying`、`verified`；
+2. `/api/status` 的 `credential_verification.verified` 增加；
+3. `register_results.jsonl` 仅对最终状态写 `status=ok,state=verified`。
 
 ## 6. 运行任务
 
@@ -147,6 +164,7 @@ scripts/run_xvfb_batch.sh 10
 .venv/bin/python sso_to_auth_json.py \
   --sso accounts/sso_pending.txt \
   --from-config config.json \
+  --verify \
   --consume-success \
   --report-json log/recovery_report.json
 ```

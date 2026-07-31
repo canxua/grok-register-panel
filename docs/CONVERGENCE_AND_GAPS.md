@@ -459,8 +459,8 @@ auth 供诊断和人工重放，不能自动删除或重新注册同一邮箱。
 
 | 优先级 | 能力 | 当前状态 | 解决方案 | 完成定义 |
 |---|---|---|---|---|
-| P0 | 新 panel -> CLIProxy auth 桥 | **未接线** | loopback Management API + 0600 secret | 新 auth 上传并热加载可见 |
-| P0 | 自动成功终态 | **已有 probe，未接主流程** | 四道门禁 + `verified` 状态 | 面板只统计真实数据面通过记录 |
+| P0 | 新 panel -> CLIProxy auth 桥 | **代码已实现，生产未部署** | loopback Management API + 专用 0600 bridge env | 新 auth 上传并热加载可见 |
+| P0 | 自动成功终态 | **四门禁已接主流程，待生产 canary** | feature flag + `verified` 状态 | 面板只统计真实数据面通过记录 |
 | P0 | 代理日志脱敏 | **本地分支仍有原始 URL 日志点** | 所有输出统一 `redact_proxy()` | 测试与日志扫描无 credential |
 | P0 | 有效动态住宅资源 | **现有代理返回 407** | 更新供应商凭据/余额，按 task 生成 sticky session | 同一账号出口不变、下账号可轮换 |
 | P1 | managed proxy pool | **上游已实现，本地未兼容合并** | 移植 `proxy_store`、API、fail closed 和错误回写 | 探活、短/长冷却、禁用、脱敏测试通过 |

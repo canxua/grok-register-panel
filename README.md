@@ -113,13 +113,15 @@ cp config.example.json config.json
 | `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
 | `proxy_file` | 可选代理池路径；支持绝对路径或项目内相对路径，优先于 `proxy` |
 | `proxies.txt` | 可选的旧版多行代理文件；未配置面板代理池时继续兼容 |
-| `register_workers` | 并发浏览器数（建议先 2～3） |
+| `register_workers` | 并发浏览器数；生产金丝雀固定为 `1` |
 | `register_count` | 单次目标数量 |
 | `max_slot_retry` | 单个账号槽位的软故障重试次数；受控金丝雀可设为 `0` |
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
 | `cpa_auth_dir` | 本地 CPA 目录（`xai-*.json`） |
 | `grok2api_auth_dir` | Grok2API 风格 auth 目录 |
 | `cpa_remote_url` / `cpa_management_key` | 远程 CPA Management API（可选） |
+| `cpa_auto_verify` | 四门禁验证开关，默认 `false`；仅单账号金丝雀启用 |
+| `cpa_data_plane_url` / `cpa_data_plane_key` / `cpa_data_plane_model` | 公网 OpenAI 兼容数据面探针 |
 
 ### 环境变量
 
@@ -130,6 +132,12 @@ cp config.example.json config.json
 | `MONITOR_PORT` | `8787` | 面板端口 |
 | `PANEL_INCLUDE_TAIL` | `0` | `1` 时状态接口附带原始日志尾部（可能含敏感信息，默认关） |
 | `CPA_AUTH_DIR` | `./cpa_auth` | 编排器 / 面板统计 CPA 数量 |
+| `CPA_AUTO_VERIFY` | `0` | 开启后只有精确 provider、上传、热加载、公网探针全部通过才计成功 |
+| `CPA_REMOTE_URL` | （空） | CLIProxy Management API 根地址；支持以 `/v0/management` 结尾 |
+| `CPA_MANAGEMENT_KEY` | （空） | Management API 密钥；也兼容 `CLIPROXY_MANAGEMENT_KEY` |
+| `CPA_DATA_PLANE_URL` | （空） | 公网 OpenAI 兼容入口根地址或完整 chat-completions 地址 |
+| `CPA_DATA_PLANE_KEY` | （空） | 数据面 API key；也兼容 `CLIPROXY_API_KEY` |
+| `CPA_DATA_PLANE_MODEL` | （空） | 金丝雀使用的模型名 |
 | `BATCH_LOG` | 自动发现最新 `log/batch*.log` | 面板跟踪的日志 |
 | `BLACKLIST_STATE_FILE` | `./log/blacklist_state.json` | 运行时 ASN 黑名单状态 |
 | `GROK_BATCH_IDLE_TIMEOUT` | `360` | batch 子进程连续无输出多少秒后自动重建（最小 60 秒） |
@@ -270,6 +278,7 @@ python grok_register_ttk.py
 python sso_to_auth_json.py \
   --sso accounts/sso_pending.txt \
   --from-config config.json \
+  --verify \
   --consume-success \
   --report-json log/recovery_report.json
 ```

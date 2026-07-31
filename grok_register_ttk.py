@@ -33,6 +33,8 @@ import re
 import string
 import json
 import base64
+import hashlib
+from dataclasses import dataclass
 
 os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
 
@@ -226,6 +228,14 @@ DEFAULT_CONFIG = {
     # 远程 CPA：通过 Management API POST /v0/management/auth-files 上传
     "cpa_remote_url": "",
     "cpa_management_key": "",
+    # 四门禁自动验证默认关闭；生产仅通过环境变量对单账号 canary 开启。
+    "cpa_auto_verify": False,
+    "cpa_verify_attempts": 2,
+    "cpa_verify_timeout": 30,
+    "cpa_hotload_timeout": 30,
+    "cpa_data_plane_url": "",
+    "cpa_data_plane_key": "",
+    "cpa_data_plane_model": "",
     # Grok2API / ~/.grok 风格 auth 目录（默认项目根目录下 grok2api_auth/）
     "grok2api_auth_dir": "grok2api_auth",
     "mailnest_api_key": "",
@@ -320,6 +330,54 @@ def mask_email(email: str) -> str:
     return local[:2] + "***@" + domain
 
 
+def credential_fingerprint(email: str) -> str:
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class CpaPublishResult:
+    state: str
+    legacy_ok: bool = False
+    verified: bool = False
+    detail: str = ""
+    provider_status: int | None = None
+    pool_status: int | None = None
+    data_plane_status: int | None = None
+
+    def __bool__(self) -> bool:
+        """Preserve legacy callers while new code reads verified explicitly."""
+        return self.legacy_ok
+
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _config_or_env(config_key: str, env_name: str, *aliases: str):
+    for name in (env_name, *aliases):
+        value = os.environ.get(name)
+        if value is not None and str(value).strip() != "":
+            return value
+    return config.get(config_key)
+
+
+def cpa_auto_verify_enabled() -> bool:
+    value = _config_or_env("cpa_auto_verify", "CPA_AUTO_VERIFY")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in _TRUE_VALUES
+
+
+def _bounded_config_int(config_key: str, env_name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(_config_or_env(config_key, env_name) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(value, high))
+
+
 FAIL_LABELS = {
     FAIL_DOMAIN: "域名拒绝",
     FAIL_RISK: "注册风控",
@@ -339,6 +397,39 @@ _RESULT_LOG_LOCK = threading.Lock()
 _RESULT_LOG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "log", "register_results.jsonl"
 )
+_CPA_STATE_LOG_LOCK = threading.Lock()
+_CPA_STATE_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "log", "cpa_states.jsonl"
+)
+
+
+def record_cpa_state(
+    email: str,
+    state: str,
+    *,
+    detail: str = "",
+    status_code: int | None = None,
+    attempt: int | None = None,
+) -> dict:
+    """Persist a non-secret credential transition for replay and panel status."""
+    from datetime import datetime, timezone
+
+    rec = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "email": mask_email(email or ""),
+        "credential_id": credential_fingerprint(email),
+        "state": str(state or ""),
+        "detail": redact_sensitive_log_line(detail or "")[:300],
+        "status_code": status_code,
+        "attempt": attempt,
+    }
+    ensure_private_dir(os.path.dirname(_CPA_STATE_LOG_PATH))
+    with _CPA_STATE_LOG_LOCK:
+        append_private_text(
+            _CPA_STATE_LOG_PATH,
+            json.dumps(rec, ensure_ascii=False) + "\n",
+        )
+    return rec
 
 
 def record_register_result(
@@ -350,6 +441,7 @@ def record_register_result(
     worker: str = "",
     bot_flag=None,
     risk=None,
+    state: str = "",
     log_callback=None,
 ) -> dict:
     """记录单次注册结果 + 出口 IP（控制台一行 + jsonl）。
@@ -392,6 +484,7 @@ def record_register_result(
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": status,
         "email": mask_email(email or ""),
+        "credential_id": credential_fingerprint(email),
         "kind": kind or "",
         "detail": redact_sensitive_log_line(detail or "")[:300],
         "worker": worker or "",
@@ -400,6 +493,7 @@ def record_register_result(
         "port": port,
         "bot_flag": bot_flag,
         "risk": risk,
+        "state": state or "",
     }
     line = (
         f"[结果] status={status} ip={exit_ip or '?'} port={port or '?'} "
@@ -902,19 +996,93 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
     return state
 
 
-def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
-    """SSO → Device Flow（失败回退授权码）换 token → 写入 CPA / Grok2API。
+def add_sso_to_cpa(raw_token, email="", log_callback=None) -> CpaPublishResult:
+    """Convert an SSO and, when enabled, require all four verification gates."""
+    auto_verify = cpa_auto_verify_enabled()
 
-    返回 True 表示入库成功（或未开启/无需转换）；False 表示转换失败（SSO 仍可能已写入 accounts）。
-    """
-    if not config.get("cpa_auto_add", False):
+    def _result(
+        state: str,
+        *,
+        legacy_ok: bool = False,
+        verified: bool = False,
+        detail: str = "",
+        status_code: int | None = None,
+        attempt: int | None = None,
+        provider_status: int | None = None,
+        pool_status: int | None = None,
+        data_plane_status: int | None = None,
+    ) -> CpaPublishResult:
+        try:
+            record_cpa_state(
+                email,
+                state,
+                detail=detail,
+                status_code=status_code,
+                attempt=attempt,
+            )
+        except Exception:
+            pass
+        return CpaPublishResult(
+            state=state,
+            legacy_ok=legacy_ok,
+            verified=verified,
+            detail=redact_sensitive_log_line(detail or "")[:300],
+            provider_status=provider_status,
+            pool_status=pool_status,
+            data_plane_status=data_plane_status,
+        )
+
+    auto_add_value = _config_or_env("cpa_auto_add", "CPA_AUTO_ADD")
+    if isinstance(auto_add_value, bool):
+        auto_add = auto_add_value
+    else:
+        auto_add = str(auto_add_value or "").strip().lower() in _TRUE_VALUES
+    if not auto_add:
         if log_callback:
             log_callback("[*] 已关闭 SSO→auth，仅保存 SSO（不写 auth）")
-        return True
-    auth_dir = str(config.get("cpa_auth_dir", "") or "").strip()
-    remote_url = str(config.get("cpa_remote_url", "") or "").strip()
-    management_key = str(config.get("cpa_management_key", "") or "").strip()
+        return _result("disabled", legacy_ok=True, detail="cpa_auto_add disabled")
+
+    auth_dir = str(_config_or_env("cpa_auth_dir", "CPA_AUTH_DIR") or "").strip()
+    remote_url = str(
+        _config_or_env(
+            "cpa_remote_url",
+            "CPA_REMOTE_URL",
+            "CLIPROXY_MANAGEMENT_URL",
+        )
+        or ""
+    ).strip()
+    management_key = str(
+        _config_or_env(
+            "cpa_management_key",
+            "CPA_MANAGEMENT_KEY",
+            "CLIPROXY_MANAGEMENT_KEY",
+        )
+        or ""
+    ).strip()
     g2a_dir = str(config.get("grok2api_auth_dir", "") or "").strip()
+    data_plane_url = str(
+        _config_or_env("cpa_data_plane_url", "CPA_DATA_PLANE_URL") or ""
+    ).strip()
+    data_plane_key = str(
+        _config_or_env(
+            "cpa_data_plane_key",
+            "CPA_DATA_PLANE_KEY",
+            "CLIPROXY_API_KEY",
+        )
+        or ""
+    ).strip()
+    data_plane_model = str(
+        _config_or_env("cpa_data_plane_model", "CPA_DATA_PLANE_MODEL") or ""
+    ).strip()
+    verify_attempts = _bounded_config_int(
+        "cpa_verify_attempts", "CPA_VERIFY_ATTEMPTS", 2, 1, 3
+    )
+    verify_timeout = _bounded_config_int(
+        "cpa_verify_timeout", "CPA_VERIFY_TIMEOUT", 30, 5, 120
+    )
+    hotload_timeout = _bounded_config_int(
+        "cpa_hotload_timeout", "CPA_HOTLOAD_TIMEOUT", 30, 2, 120
+    )
 
     # 相对路径基于项目根目录解析，并自动创建目录
     if auth_dir and not os.path.isabs(auth_dir):
@@ -927,16 +1095,16 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             log_callback(
                 "[Debug] 已开启 SSO→auth 但未配置 cpa_auth_dir / cpa_remote_url / grok2api_auth_dir，跳过"
             )
-        return True
-    if remote_url and not management_key:
+        return _result("not_configured", legacy_ok=True, detail="no auth output configured")
+    if remote_url and not management_key and not auto_verify:
         if log_callback:
             log_callback("[Debug] 已配置 cpa_remote_url 但未配置 cpa_management_key，跳过远程上传")
         remote_url = ""
     if not auth_dir and not remote_url and not g2a_dir:
-        return True
+        return _result("not_configured", legacy_ok=True, detail="no usable auth output configured")
     sso = _normalize_sso_token(raw_token)
     if not sso:
-        return False
+        return _result("token_exchange_failed", detail="missing SSO token")
     proxy = _resolve_cpa_proxy()
 
     def _cpa_log(message):
@@ -990,7 +1158,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         if not token:
             _cpa_log("换 token 失败；SSO 已在 accounts 文件，稍后可重转")
             _append_sso_pending(email, sso, log_callback=log_callback)
-            return False
+            return _result("token_exchange_failed", detail="token exchange returned empty")
         record = _s2cpa.token_to_cpa_record(token, email=email, sso=sso)
         ap = _s2cpa.decode_jwt_payload(record.get("access_token", ""))
         ref = ap.get("referrer")
@@ -1000,33 +1168,237 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         if auth_dir:
             try:
                 path = _s2cpa.write_cpa_auth(_s2cpa.Path(auth_dir), record)
-                _cpa_log(f"已写入 CPA 本地 {path}")
+                _cpa_log(f"已写入 CPA 本地 auth 文件 {mask_email(path.name)}")
                 wrote_ok = True
             except Exception as local_exc:
                 _cpa_log(f"CPA 本地写入失败: {local_exc}")
-        if remote_url:
-            try:
-                name = _s2cpa.upload_cpa_auth_remote(remote_url, management_key, record, proxy=proxy)
-                _cpa_log(f"已上传 CPA 远程 {remote_url.rstrip('/')}/.../{name}")
-                wrote_ok = True
-            except Exception as remote_exc:
-                _cpa_log(f"CPA 远程上传失败: {remote_exc}")
         if g2a_dir:
             try:
                 gpath = _s2cpa.write_grok2api_auth(_s2cpa.Path(g2a_dir), token, email=email)
-                _cpa_log(f"已写入 Grok2API {gpath}")
+                _cpa_log(f"已写入 Grok2API auth 文件 {mask_email(gpath.name)}")
                 wrote_ok = True
             except Exception as g2a_exc:
                 _cpa_log(f"Grok2API 写入失败: {g2a_exc}")
-        if not wrote_ok:
-            _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
+        _result(
+            "token_written",
+            legacy_ok=wrote_ok,
+            detail="auth record generated" + (" and stored locally" if wrote_ok else ""),
+        )
+
+        if not auto_verify:
+            if remote_url:
+                try:
+                    name = _s2cpa.upload_cpa_auth_remote(
+                        remote_url,
+                        management_key,
+                        record,
+                        timeout=verify_timeout,
+                        proxy=proxy,
+                    )
+                    _cpa_log(f"已上传 CPA 远程 auth 文件 {mask_email(name)}")
+                    wrote_ok = True
+                except Exception as remote_exc:
+                    _cpa_log(
+                        f"CPA 远程上传失败: {redact_sensitive_log_line(str(remote_exc))}"
+                    )
+            if not wrote_ok:
+                _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
+                _append_sso_pending(email, sso, log_callback=log_callback)
+                return _result("token_written", detail="all configured auth writes failed")
+            return _result(
+                "legacy_unverified",
+                legacy_ok=True,
+                detail="verification gate disabled",
+            )
+
+        provider = _s2cpa.probe_cpa_record_verified(
+            record,
+            proxy=proxy,
+            timeout=verify_timeout,
+            attempts=verify_attempts,
+        )
+        provider_status = provider.get("status_code")
+        if not provider.get("ok"):
+            state = (
+                "provider_denied"
+                if provider.get("failure_kind") == "provider_denied"
+                else "verification_failed"
+            )
+            _cpa_log(
+                f"精确 provider 验证失败 state={state} HTTP={provider_status or '-'}"
+            )
             _append_sso_pending(email, sso, log_callback=log_callback)
-            return False
-        return True
+            return _result(
+                state,
+                detail=str(provider.get("summary") or "provider verification failed"),
+                status_code=provider_status,
+                attempt=provider.get("attempts"),
+                provider_status=provider_status,
+            )
+        _result(
+            "provider_verified",
+            detail="exact credential provider request succeeded",
+            status_code=provider_status,
+            attempt=provider.get("attempts"),
+            provider_status=provider_status,
+        )
+        _cpa_log(f"精确 provider 验证通过 HTTP={provider_status}")
+
+        if not remote_url or not management_key:
+            _append_sso_pending(email, sso, log_callback=log_callback)
+            return _result(
+                "pool_sync_failed",
+                detail="missing CPA remote URL or management key",
+                provider_status=provider_status,
+            )
+        try:
+            name = _s2cpa.upload_cpa_auth_remote(
+                remote_url,
+                management_key,
+                record,
+                timeout=verify_timeout,
+                proxy=proxy,
+            )
+        except Exception as remote_exc:
+            _append_sso_pending(email, sso, log_callback=log_callback)
+            return _result(
+                "pool_sync_failed",
+                detail=str(remote_exc),
+                provider_status=provider_status,
+            )
+        _result(
+            "pool_uploaded",
+            detail="Management API accepted auth payload",
+            provider_status=provider_status,
+        )
+        _cpa_log(f"Management API 已接收 auth 文件 {mask_email(name)}")
+
+        loaded = _s2cpa.wait_cpa_auth_remote(
+            remote_url,
+            management_key,
+            name,
+            expected_size=len(_s2cpa.cpa_auth_payload(record)),
+            timeout=hotload_timeout,
+            proxy=proxy,
+        )
+        pool_status = loaded.get("status_code")
+        if not loaded.get("ok"):
+            _append_sso_pending(email, sso, log_callback=log_callback)
+            return _result(
+                "pool_sync_failed",
+                detail=str(loaded.get("summary") or "auth file not hot-loaded"),
+                status_code=pool_status,
+                provider_status=provider_status,
+                pool_status=pool_status,
+            )
+        _result(
+            "pool_loaded",
+            detail="auth filename and payload size visible in CLIProxy",
+            status_code=pool_status,
+            provider_status=provider_status,
+            pool_status=pool_status,
+        )
+        _cpa_log(f"CLIProxy 热加载确认通过 HTTP={pool_status}")
+
+        _result(
+            "data_plane_verifying",
+            detail="starting operator-facing API probe",
+            provider_status=provider_status,
+            pool_status=pool_status,
+        )
+        data_plane = _s2cpa.probe_openai_data_plane(
+            data_plane_url,
+            data_plane_key,
+            data_plane_model,
+            timeout=verify_timeout,
+            attempts=verify_attempts,
+        )
+        data_status = data_plane.get("status_code")
+        if not data_plane.get("ok"):
+            _append_sso_pending(email, sso, log_callback=log_callback)
+            return _result(
+                "data_plane_failed",
+                detail=str(data_plane.get("summary") or "data-plane verification failed"),
+                status_code=data_status,
+                attempt=data_plane.get("attempts"),
+                provider_status=provider_status,
+                pool_status=pool_status,
+                data_plane_status=data_status,
+            )
+        _cpa_log(f"公网数据面验证通过 HTTP={data_status}")
+        return _result(
+            "verified",
+            legacy_ok=True,
+            verified=True,
+            detail="all credential publication gates passed",
+            status_code=data_status,
+            attempt=data_plane.get("attempts"),
+            provider_status=provider_status,
+            pool_status=pool_status,
+            data_plane_status=data_status,
+        )
     except Exception as exc:
         _cpa_log(f"直出失败: {redact_sensitive_log_line(str(exc))}")
         _append_sso_pending(email, sso, log_callback=log_callback)
-        return False
+        return _result("verification_failed", detail=str(exc))
+
+
+def registration_outcome_is_success(result: CpaPublishResult) -> bool:
+    """Only the enabled verification gate can promote a record to verified."""
+    if cpa_auto_verify_enabled():
+        return bool(result.verified and result.state == "verified")
+    return True
+
+
+def record_registration_outcome(
+    result: CpaPublishResult,
+    email: str,
+    *,
+    worker: str = "",
+    log_callback=None,
+) -> bool:
+    success = registration_outcome_is_success(result)
+    if success:
+        detail = "verified" if result.verified else (
+            "cpa_legacy_ok" if result.legacy_ok else "cpa_legacy_fail"
+        )
+        record_register_result(
+            "ok",
+            email,
+            kind="success",
+            detail=detail,
+            state=result.state,
+            worker=worker,
+            bot_flag=0,
+            log_callback=log_callback,
+        )
+    else:
+        record_register_result(
+            "pending",
+            email,
+            kind=FAIL_CPA,
+            detail=result.detail or result.state,
+            state=result.state,
+            worker=worker,
+            bot_flag=0,
+            log_callback=log_callback,
+        )
+    return success
+
+
+def log_registration_outcome(
+    result: CpaPublishResult,
+    email: str,
+    log_callback,
+) -> None:
+    if result.verified:
+        log_callback(f"[+] 注册成功: {email}")
+    elif cpa_auto_verify_enabled():
+        log_callback(f"[-] CPA 验证未完成 [{result.state}]: {email}")
+    elif result.legacy_ok:
+        log_callback(f"[+] 注册成功: {email}")
+    else:
+        log_callback(f"[+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
 
 
 # create_browser_options -> browser_session
@@ -3201,14 +3573,22 @@ class GrokRegisterGUI:
                             self.results.append({"email": email, "sso": sso, "profile": profile})
                     else:
                         self.results.append({"email": email, "sso": sso, "profile": profile})
-                    cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=wlog)
-                    self._record_success()
+                    cpa_result = add_sso_to_cpa(sso, email=email, log_callback=wlog)
+                    outcome_success = record_registration_outcome(
+                        cpa_result,
+                        email,
+                        worker="GUI",
+                        log_callback=wlog,
+                    )
+                    if outcome_success:
+                        self._record_success()
+                    else:
+                        self._record_failure(
+                            RuntimeError(f"[CPA] 验证未完成: {cpa_result.state}")
+                        )
                     retry_count_for_slot = 0
                     i += 1
-                    if cpa_ok:
-                        wlog(f"[+] 注册成功: {email}")
-                    else:
-                        wlog(f"[+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
+                    log_registration_outcome(cpa_result, email, wlog)
                     if (
                         self.success_count > 0
                         and self.success_count % MEMORY_CLEANUP_INTERVAL == 0
@@ -3504,28 +3884,30 @@ def run_registration_cli(count):
                                 log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             )
                             raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
-                        cpa_ok = add_sso_to_cpa(
+                        cpa_result = add_sso_to_cpa(
                             sso, email=email, log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
                         )
-                        local_success += 1
+                        outcome_success = record_registration_outcome(
+                            cpa_result,
+                            email,
+                            worker=f"W{wid+1}",
+                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                        )
+                        if outcome_success:
+                            local_success += 1
+                        else:
+                            local_fail += 1
+                            local_fail_stats[FAIL_CPA] = local_fail_stats.get(FAIL_CPA, 0) + 1
                         i += 1
                         retry = 0
-                        if cpa_ok:
-                            cli_log(f"[W{wid+1}] [+] 注册成功: {email}")
-                        else:
-                            cli_log(f"[W{wid+1}] [+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
-                        record_register_result(
-                            "ok",
+                        log_registration_outcome(
+                            cpa_result,
                             email,
-                            kind="success",
-                            detail="cpa_ok" if cpa_ok else "cpa_fail",
-                            worker=f"W{wid+1}",
-                            bot_flag=0,
-                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                            lambda m: cli_log(f"[W{wid+1}] {m}"),
                         )
                         mark_slot_completed()
                         # 每成功 2 个换 sticky，降低同 IP 密度（对齐 ~4 分钟窗口）
-                        if local_success % 2 == 0:
+                        if outcome_success and local_success % 2 == 0:
                             rotate_idx += 1
                     except RegistrationCancelled:
                         break
@@ -3864,24 +4246,23 @@ def run_registration_cli(count):
                     cli_log(f"[!] 保存账号文件失败，当前账号不计为成功: {file_exc}")
                     _append_sso_pending(email, sso, log_callback=cli_log)
                     raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
-                cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
-                success_count += 1
-                retry_count_for_slot = 0
-                i += 1
-                if cpa_ok:
-                    cli_log(f"[+] 注册成功: {email}")
-                else:
-                    cli_log(f"[+] 注册成功（SSO 已保存，CPA 入库失败）: {email}")
-                record_register_result(
-                    "ok",
+                cpa_result = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
+                outcome_success = record_registration_outcome(
+                    cpa_result,
                     email,
-                    kind="success",
-                    detail="cpa_ok" if cpa_ok else "cpa_fail",
                     worker="W1",
-                    bot_flag=0,
                     log_callback=cli_log,
                 )
-                if success_count % 2 == 0:
+                if outcome_success:
+                    success_count += 1
+                else:
+                    _cli_record_failure(
+                        RuntimeError(f"[CPA] 验证未完成: {cpa_result.state}")
+                    )
+                retry_count_for_slot = 0
+                i += 1
+                log_registration_outcome(cpa_result, email, cli_log)
+                if outcome_success and success_count % 2 == 0:
                     single_rotate_idx += 1
                 cli_log(f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count}")
                 mark_slot_completed()
