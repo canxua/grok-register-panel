@@ -119,6 +119,7 @@ CPA_GROK_HEADERS = {
 }
 CPA_PROBE_MODEL = "grok-4.5"
 CPA_PROBE_URL = f"{CPA_GROK_BASE_URL}/responses"
+CPA_PROBE_MAX_OUTPUT_TOKENS = 16
 GROK_HOME_URL = "https://grok.com/"
 
 
@@ -1377,7 +1378,7 @@ def probe_cpa_record_verified(
         "json": {
             "model": model,
             "input": "ping",
-            "max_output_tokens": 2,
+            "max_output_tokens": CPA_PROBE_MAX_OUTPUT_TOKENS,
             "stream": False,
         },
         "impersonate": "chrome",

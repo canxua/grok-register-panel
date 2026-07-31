@@ -31,6 +31,14 @@ def test_semantic_payload_validation_rejects_generic_ok():
     assert cpa.is_responses_success_payload(
         {"id": "resp_1", "status": "completed", "output": []}
     ) is True
+    assert cpa.is_responses_success_payload(
+        {
+            "id": "resp_2",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "reasoning"}],
+        }
+    ) is False
     assert cpa.is_chat_completion_success_payload(
         {"id": "chatcmpl_1", "choices": [{"index": 0}]}
     ) is True
@@ -109,6 +117,37 @@ def test_provider_probe_rejects_generic_http_200():
 
     assert result["ok"] is False
     assert result["failure_kind"] == "invalid_response"
+
+
+def test_provider_probe_uses_completion_sized_token_budget():
+    class FakeRequests:
+        post_kwargs = None
+
+        @classmethod
+        def post(cls, _url, **kwargs):
+            cls.post_kwargs = kwargs
+            return FakeResponse(
+                200,
+                {"id": "resp_1", "status": "completed", "output": []},
+            )
+
+    original = cpa.requests
+    cpa.requests = FakeRequests
+    try:
+        result = cpa.probe_cpa_record_verified(
+            {"access_token": "token", "headers": {}},
+            attempts=1,
+        )
+    finally:
+        cpa.requests = original
+
+    assert result["ok"] is True
+    assert (
+        FakeRequests.post_kwargs["json"]["max_output_tokens"]
+        == cpa.CPA_PROBE_MAX_OUTPUT_TOKENS
+        >= 16
+    )
+    assert FakeRequests.post_kwargs["json"]["stream"] is False
 
 
 def test_data_plane_requires_chat_completion_shape():
@@ -230,6 +269,7 @@ if __name__ == "__main__":
     test_semantic_payload_validation_rejects_generic_ok()
     test_management_upload_and_hotload_contract()
     test_provider_probe_rejects_generic_http_200()
+    test_provider_probe_uses_completion_sized_token_budget()
     test_data_plane_requires_chat_completion_shape()
     test_panel_state_machine_reaches_verified_only_after_all_gates()
     print("OK CPA verification")
