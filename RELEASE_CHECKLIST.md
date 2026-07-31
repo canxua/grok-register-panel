@@ -14,7 +14,8 @@
 - [ ] `MONITOR_TOKEN` is set and anonymous operational API requests return 401.
 - [ ] `PANEL_INCLUDE_TAIL=0` in the production environment.
 - [ ] If `PANEL_INCLUDE_TAIL=1`, operational APIs require authentication and returned log lines pass the redaction tests.
-- [ ] The monitor binds to the intended loopback, LAN, or Tailscale address only.
+- [ ] The monitor binds only to the intended loopback, private bridge, LAN, or Tailscale address.
+- [ ] If a public hostname is enabled, `scripts/check_public_panel.sh` passes and the OVH public IP does not accept the monitor port.
 - [ ] Blacklist state was migrated before replacing legacy source files.
 - [ ] Pending SSO counts and recovery controls were checked without starting a job.
 - [ ] Desktop and mobile screenshots were reviewed in light and dark themes.

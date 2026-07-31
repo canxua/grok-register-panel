@@ -19,3 +19,4 @@ Format: `- **YYYY-MM-DD** - Decision description. See <issue-ref>.`
 - **2026-08-01** - Prefer Authorization Code for Grok Build credentials and retain Device Flow only as fallback because the exact Device credential was provider-denied. See `CURRENT_STATE.md`.
 - **2026-08-01** - Route verified panel auth through the AI Stack controller import API before CLIProxy hot-load verification, so monitoring and runtime state share one write path. See `7af0e72`.
 - **2026-08-01** - Keep the old replenishment components and pool controller running per the operator's decision; no resource-convergence action is currently scheduled. See `CONVERGENCE_AND_GAPS.md`.
+- **2026-08-01** - Publish the register panel through the existing Cloudflare Tunnel while binding its origin only to the AI Stack Docker bridge; retain `MONITOR_TOKEN` for every operational read and write. See `CURRENT_STATE.md`.

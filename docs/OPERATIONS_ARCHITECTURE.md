@@ -33,11 +33,12 @@
 
 ```mermaid
 flowchart LR
-    operator["Mac 运维者"] -->|"SSH tunnel :18080"| panel
+    operator["Mac 运维者"] -->|"HTTPS + MONITOR_TOKEN"| edge
     operator -->|"Cloudflare Access"| ops
+    edge["Cloudflare Tunnel\nregister.canxu.top"] -->|"Docker bridge :18080"| panel
 
     subgraph ovh["OVH VPS"]
-        panel["Register Panel\nMonitor + 手动控制"]
+        panel["Register Panel\n172.19.0.1:18080\nMonitor + 手动控制"]
         runner["单账号 Worker\nXvfb + Camoufox"]
         proxy_pool["Managed Proxy Pool\n探活 / 冷却 / fail closed"]
         warp["WARP local proxy\n127.0.0.1:40000"]
@@ -64,11 +65,14 @@ flowchart LR
 
 ### 网络边界
 
+- `register.canxu.top` 由现有 Cloudflare Tunnel 转发到 Docker 私网网关
+  `172.19.0.1:18080`。OVH 公网网卡不监听该端口；静态页面和 health 可匿名访问，
+  运行数据与控制 API 必须携带独立 `MONITOR_TOKEN`。
 - WARP 使用 local proxy mode；只有显式传入 `socks5h://127.0.0.1:40000` 的注册浏览器、
   OAuth 和精确探针走 Cloudflare 出口。
 - 宿主机默认路由仍是 `ens3`。AI Stack、SSH、邮箱管理 API 和 loopback 管理调用没有被
   全局改道。
-- loopback 请求由代码明确跳过外部 proxy，防止 controller/CLIProxy 调用绕远路。
+- loopback 与 Docker 私网管理请求不经过 WARP，防止 controller/CLIProxy/Tunnel 调用绕远路。
 - WARP 是 Cloudflare 网络出口，不是住宅 ASN，也不是“每账号自动换 IP”的动态住宅池。
 
 ### 数据存放位置

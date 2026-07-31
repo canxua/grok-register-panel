@@ -54,7 +54,7 @@ update the matching source before ending:
 | Layer | Technology |
 |---|---|
 | Registration worker | Python 3.11+, Camoufox, Xvfb |
-| Control panel | Python HTTP server under systemd, loopback only |
+| Control panel | Python HTTP server under systemd, private Docker bridge only; public HTTPS through Cloudflare Tunnel |
 | Email | Cloudflare-managed mailbox integration |
 | Auth output | Private `cpa_auth/*.json`, mode 0600 |
 | Existing data plane | API gateway, New API, CLIProxyAPI, PostgreSQL, Redis |

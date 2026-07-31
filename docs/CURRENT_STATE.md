@@ -5,7 +5,7 @@
 
 ## 快照
 
-- **核验时间：** 2026-08-01 01:50 Asia/Shanghai
+- **核验时间：** 2026-08-01 07:35 Asia/Shanghai
 - **本地仓库：** `/Users/jack/project/github/grok-register-panel`
 - **OVH register-panel 运行基线：** `7af0e72`
 - **AI Stack controller 契约修复：** `f31b737`
@@ -13,24 +13,32 @@
 - **原始上游：** `lij768423-svg/grok-register-panel`
 - **OVH register-panel：** `/opt/grok-register-panel`
 - **同机 AI Stack：** `/opt/ai-stack`
-- **新注册面板：** OVH `127.0.0.1:18080`，只通过 SSH tunnel 访问
+- **新注册面板：** `https://register.canxu.top`；OVH 源站仅监听 Docker 私网
+  `172.19.0.1:18080`
 - **AI Stack 控制台：** `https://ops.canxu.top/dashboard`
 - **公网数据面：** `https://api.canxu.top`
 
-本地访问新注册面板：
+直接访问新注册面板：
 
-```bash
-ssh -N -L 18080:127.0.0.1:18080 ovh-ai-stack
+```text
+https://register.canxu.top
 ```
 
-随后打开 `http://127.0.0.1:18080`。这不是 `ops.canxu.top`；后者是 AI Stack 的只读
-运维控制台。
+页面与 `/api/health` 可匿名加载；运行数据和所有控制操作仍要求在页面顶部输入
+`MONITOR_TOKEN`。Token 不写入 URL，也不进入 Git。需要绕过 Cloudflare 做应急访问时：
+
+```bash
+ssh -N -L 18080:172.19.0.1:18080 ovh-ai-stack
+```
+
+随后打开 `http://127.0.0.1:18080`。`ops.canxu.top` 仍是 AI Stack 的只读运维控制台；
+其页头现在提供注册控制台入口。
 
 ## 已确认事实
 
 1. 注册账号、SSO、面板 auth、代理池和日志都保存在 OVH。当前正式 `cpa_auth/` 有
    3 个私有文件，隔离目录另有 1 个 canary 文件；本地 checkout 不保存这些秘密。
-2. `grok-register-panel.service` 已部署 `7af0e72`，处于 `active/enabled`，loopback
+2. `grok-register-panel.service` 已部署 `7af0e72`，处于 `active/enabled`；Docker 私网
    `/api/health` 返回 `ok=true`。面板服务在线不等于注册任务正在运行。
 3. 官方 Cloudflare WARP 客户端以 local proxy 模式监听 `127.0.0.1:40000`；
    `warp-cli` 为 `Connected / healthy`。受管代理池看到 1 个健康出口。宿主机默认路由
@@ -60,6 +68,9 @@ ssh -N -L 18080:127.0.0.1:18080 ovh-ai-stack
     `run_until_100.py` 或 `run_batch_headless.py` 子进程。当前自动注册没有在执行。
 12. Trellis `v1.1.0` 已同时接入 Codex 与 Grok；Codex 读 `AGENTS.md`，Grok 复用
     `.grok/` 和共享 hook，本地 BM25 brain 是当前可靠检索基线。
+13. Cloudflare Tunnel `ovh-ai-stack` 已增加 `register.canxu.top ->
+    http://172.19.0.1:18080`。外部首页与 health 为 `200`，未鉴权 `/api/status` 为
+    `401`，OVH 公网 IP 的 `18080` 不可达；Tunnel 原有 api/ops 路由回归正常。
 
 ## 当前运行模式
 
@@ -97,6 +108,9 @@ ssh -N -L 18080:127.0.0.1:18080 ovh-ai-stack
    使用 CPA-Manager-Plus；细节见 `CREDENTIAL_QUOTA_DASHBOARD.md`。
 6. **向量检索未启用。** QMD BM25 正常；本机 Metal 后端仍阻塞 vector/hybrid，且不影响
    Codex/Grok 的文档连续性。
+7. **注册面板尚未叠加 Cloudflare Access。** 当前 HTTPS 边缘后仍由独立、长随机
+   `MONITOR_TOKEN` 保护全部运行数据与写操作；如需与 `ops.canxu.top` 相同的外层登录，
+   应复用同一 operator 身份策略，且不得移除内层 Token。
 
 ## 恢复检查
 
@@ -105,7 +119,8 @@ git status --short --branch
 bash brain/bin/qmd search "WARP controller import verified"
 PYTHON_BIN=.venv/bin/python bash scripts/run_tests.sh
 ssh -o ClearAllForwardings=yes ovh-ai-stack \
-  'sudo systemctl is-active grok-register-panel.service; sudo warp-cli --accept-tos status'
+  'sudo systemctl is-active grok-register-panel.service; curl -fsS http://172.19.0.1:18080/api/health; sudo warp-cli --accept-tos status'
+bash scripts/check_public_panel.sh https://register.canxu.top
 ```
 
 生产事实会漂移。重新回答“是否在注册、多少凭据健康”前，必须同时检查进程、controller、

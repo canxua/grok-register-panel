@@ -194,10 +194,33 @@ scripts/run_xvfb_batch.sh 10
   --report-json log/recovery_report.json
 ```
 
-## 8. 安全边界
+## 8. Cloudflare Tunnel 公网入口
+
+需要域名访问时，不要把面板绑定到 `0.0.0.0`，也不要开放 OVH 防火墙端口。复用同机
+AI Stack Tunnel 的做法是：
+
+1. 将 `MONITOR_HOST` 设为 AI Stack Docker bridge 的固定网关地址，例如
+   `172.19.0.1`；保留长随机 `MONITOR_TOKEN`。
+2. 先从 Tunnel 所在 Docker 网络内请求 `http://172.19.0.1:18080/api/health`。
+3. 在 remotely managed Tunnel 中添加 `register.canxu.top ->
+   http://172.19.0.1:18080`；DNS 由 Tunnel 路由创建。
+4. 确认 OVH 公网 IP 的 `18080` 仍不可达，外部运行数据接口未带 Token 返回 `401`。
+
+当前生产验收：
+
+```bash
+bash scripts/check_public_panel.sh https://register.canxu.top
+curl --connect-timeout 2 http://OVH_PUBLIC_IP:18080/api/health  # 必须失败
+```
+
+应急回滚是删除该 Tunnel hostname、把备份的 `.monitor.env` 恢复为 loopback 地址并重启
+`grok-register-panel.service`。不要删除账号、auth、日志或代理池状态。
+
+## 9. 安全边界
 
 - `/api/health` 和静态页面可匿名访问；运行数据 API 在配置 Token 后要求鉴权。
-- 不要通过公网裸露内置 HTTP 服务。公网访问应放在有 TLS 和额外身份认证的反向代理后。
+- 不要通过公网 IP 裸露内置 HTTP 服务。公网访问必须经 TLS Tunnel，且运行数据与控制
+  API 继续要求 `MONITOR_TOKEN`；需要双层身份时再叠加 Cloudflare Access。
 - 生产环境不要启用原始日志尾部。
 - 不要把 Token 写入 URL、命令行参数、仓库或 issue。
 - 代理池 API 不返回账号密码，但 `log/proxy_pool.json` 本身含真实凭据，备份与迁移时按密钥材料处理。
