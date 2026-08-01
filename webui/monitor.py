@@ -2431,6 +2431,7 @@ async function api(path, opts) {
   if (!r.ok) {
     if (r.status === 401) {
       if (authHelp) showHelpFor("令牌");
+      if (!tok) throw new Error("请输入访问令牌后重试");
       throw new Error("访问令牌不匹配，请重新输入当前面板令牌");
     }
     throw new Error(j.error || j.detail || r.statusText || "request failed");

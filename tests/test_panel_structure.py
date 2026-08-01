@@ -107,6 +107,7 @@ def test_help_and_faq_module():
     assert 'function handleHelpTabKey(event)' in mon
     assert 'function filterFaq(value)' in mon
     assert 'showHelpFor("令牌")' in mon
+    assert '请输入访问令牌后重试' in mon
     assert '访问令牌不匹配，请重新输入当前面板令牌' in mon
     assert '—' not in html
     assert '–' not in html
