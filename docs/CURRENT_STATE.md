@@ -5,10 +5,10 @@
 
 ## 快照
 
-- **核验时间：** 2026-08-01 07:35 Asia/Shanghai
+- **核验时间：** 2026-08-01 08:13 Asia/Shanghai
 - **本地仓库：** `/Users/jack/project/github/grok-register-panel`
-- **OVH register-panel 运行基线：** `7af0e72`
-- **AI Stack controller 契约修复：** `f31b737`
+- **OVH register-panel 运行基线：** `cbb5c91`
+- **AI Stack 运行基线：** `13ccbfa`（controller 导入契约修复始于 `f31b737`）
 - **可写远端：** `https://github.com/canxua/grok-register-panel` 的 `main`
 - **原始上游：** `lij768423-svg/grok-register-panel`
 - **OVH register-panel：** `/opt/grok-register-panel`
@@ -38,7 +38,7 @@ ssh -N -L 18080:172.19.0.1:18080 ovh-ai-stack
 
 1. 注册账号、SSO、面板 auth、代理池和日志都保存在 OVH。当前正式 `cpa_auth/` 有
    3 个私有文件，隔离目录另有 1 个 canary 文件；本地 checkout 不保存这些秘密。
-2. `grok-register-panel.service` 已部署 `7af0e72`，处于 `active/enabled`；Docker 私网
+2. `grok-register-panel.service` 已部署 `cbb5c91`，处于 `active/enabled`；Docker 私网
    `/api/health` 返回 `ok=true`。面板服务在线不等于注册任务正在运行。
 3. 官方 Cloudflare WARP 客户端以 local proxy 模式监听 `127.0.0.1:40000`；
    `warp-cli` 为 `Connected / healthy`。受管代理池看到 1 个健康出口。宿主机默认路由
@@ -70,7 +70,12 @@ ssh -N -L 18080:172.19.0.1:18080 ovh-ai-stack
     `.grok/` 和共享 hook，本地 BM25 brain 是当前可靠检索基线。
 13. Cloudflare Tunnel `ovh-ai-stack` 已增加 `register.canxu.top ->
     http://172.19.0.1:18080`。外部首页与 health 为 `200`，未鉴权 `/api/status` 为
-    `401`，OVH 公网 IP 的 `18080` 不可达；Tunnel 原有 api/ops 路由回归正常。
+    `401`，OVH 公网 IP 的 `18080` 不可达；Tunnel 原有 api/ops 路由回归正常。AI Stack
+    页头已增加注册控制台入口，面板未输入 Token 时会明确提示输入，不再误报 Token 不匹配。
+14. 2026-08-01 08:13 的最终发布验收为：register-panel 全量 release tests 通过；AI Stack
+    `94 passed / 16 skipped`、repository safety 和 Compose 校验通过；公网面板
+    `root=200 / health=200 / anonymous_status=401 / authenticated_status=200`；真实数据面
+    non-stream、stream、tool-use 三阶段全部通过。两个本地仓库均与各自远端 `main` 一致。
 
 ## 当前运行模式
 
